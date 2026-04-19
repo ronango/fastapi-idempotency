@@ -40,4 +40,8 @@ jobs:
         # TODO(v0.1.0): drop --cov-fail-under=0 once real tests land; pyproject enforces 95%.
         run: uv run pytest --cov --cov-fail-under=0 -m "not redis"
       - name: pip-audit
-        run: uv run pip-audit --strict
+        # Audit the resolved lockfile (not the editable install of this project).
+        # --disable-pip: resolver reads pinned+hashed requirements, no network resolve.
+        run: |
+          uv export --frozen --no-emit-project --format requirements-txt \
+            | uv run pip-audit --strict --disable-pip -r /dev/stdin
