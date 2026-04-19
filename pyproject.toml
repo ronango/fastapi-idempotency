@@ -10,7 +10,7 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
-authors = [{ name = "ronango", email = "roman.samsonov.dev@gmail.com" }]
+authors = [{ name = "ronango", email = "samsonov.roman.dev@gmail.com" }]
 keywords = ["fastapi", "starlette", "asgi", "idempotency", "middleware", "http"]
 classifiers = [
     "Development Status :: 3 - Alpha",
