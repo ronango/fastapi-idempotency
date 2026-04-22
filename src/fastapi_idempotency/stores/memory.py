@@ -38,20 +38,35 @@ class InMemoryStore:
     ) -> AcquireResult:
         async with self._lock:
             now = time.time()
-            record = IdempotencyRecord(
-                key=key,
-                fingerprint=fingerprint,
-                state=IdempotencyState.IN_FLIGHT,
-                created_at=now,
-                expires_at=now + ttl,
-                response=None,
-            )
-            self._records[key] = record
-            return AcquireResult(outcome=AcquireOutcome.CREATED, record=record)
+            existing = self._records.get(key)
+            if existing is not None and existing.is_expired(now):
+                existing = None
+
+            if existing is None:
+                record = IdempotencyRecord(
+                    key=key,
+                    fingerprint=fingerprint,
+                    state=IdempotencyState.IN_FLIGHT,
+                    created_at=now,
+                    expires_at=now + ttl,
+                    response=None,
+                )
+                self._records[key] = record
+                return AcquireResult(outcome=AcquireOutcome.CREATED, record=record)
+
+            if existing.fingerprint != fingerprint:
+                return AcquireResult(outcome=AcquireOutcome.MISMATCH, record=existing)
+
+            if existing.state is IdempotencyState.IN_FLIGHT:
+                return AcquireResult(outcome=AcquireOutcome.IN_FLIGHT, record=existing)
+            return AcquireResult(outcome=AcquireOutcome.REPLAY, record=existing)
 
     async def get(self, key: IdempotencyKey) -> IdempotencyRecord | None:
         async with self._lock:
-            return self._records.get(key)
+            record = self._records.get(key)
+            if record is None or record.is_expired(time.time()):
+                return None
+            return record
 
     async def complete(
         self,
