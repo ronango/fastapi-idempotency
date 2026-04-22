@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import replace
 
+from fastapi_idempotency.errors import StoreError
 from fastapi_idempotency.types import (
     AcquireOutcome,
     AcquireResult,
@@ -74,7 +76,18 @@ class InMemoryStore:
         response: CachedResponse,
         ttl: float,
     ) -> None:
-        raise NotImplementedError
+        async with self._lock:
+            existing = self._records.get(key)
+            if existing is None:
+                raise StoreError(
+                    f"cannot complete unknown idempotency key: {key!r}",
+                )
+            self._records[key] = replace(
+                existing,
+                state=IdempotencyState.COMPLETED,
+                expires_at=time.time() + ttl,
+                response=response,
+            )
 
     async def release(self, key: IdempotencyKey) -> None:
         async with self._lock:
