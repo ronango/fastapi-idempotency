@@ -50,7 +50,8 @@ class InMemoryStore:
             return AcquireResult(outcome=AcquireOutcome.CREATED, record=record)
 
     async def get(self, key: IdempotencyKey) -> IdempotencyRecord | None:
-        raise NotImplementedError
+        async with self._lock:
+            return self._records.get(key)
 
     async def complete(
         self,
@@ -61,4 +62,5 @@ class InMemoryStore:
         raise NotImplementedError
 
     async def release(self, key: IdempotencyKey) -> None:
-        raise NotImplementedError
+        async with self._lock:
+            self._records.pop(key, None)
