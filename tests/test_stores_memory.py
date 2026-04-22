@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
+from collections import Counter
 
 import pytest
 
@@ -133,3 +135,15 @@ async def test_complete_raises_store_error_on_unknown_key() -> None:
 
     with pytest.raises(StoreError):
         await store.complete(KEY, RESPONSE, ttl=3600.0)
+
+
+async def test_concurrent_acquire_yields_exactly_one_created() -> None:
+    store = InMemoryStore()
+
+    results = await asyncio.gather(
+        *(store.acquire(KEY, FP, ttl=30.0) for _ in range(10)),
+    )
+
+    outcomes = Counter(r.outcome for r in results)
+    assert outcomes[AcquireOutcome.CREATED] == 1
+    assert outcomes[AcquireOutcome.IN_FLIGHT] == 9
