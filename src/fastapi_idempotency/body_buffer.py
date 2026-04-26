@@ -43,17 +43,22 @@ async def buffer_request_body(
             break
 
     body = b"".join(chunks)
-    return body, _make_replay(body)
+    return body, _Replay(body)
 
 
-def _make_replay(body: bytes) -> Receive:
-    consumed = False
+class _Replay:
+    """One-shot ASGI ``receive`` yielding a buffered body once."""
 
-    async def replay() -> Message:
-        nonlocal consumed
-        if consumed:
+    def __init__(self, body: bytes) -> None:
+        self._message: Message = {
+            "type": "http.request",
+            "body": body,
+            "more_body": False,
+        }
+        self._consumed = False
+
+    async def __call__(self) -> Message:
+        if self._consumed:
             raise RuntimeError("replay receive() called twice")
-        consumed = True
-        return {"type": "http.request", "body": body, "more_body": False}
-
-    return replay
+        self._consumed = True
+        return self._message
