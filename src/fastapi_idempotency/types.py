@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import NewType, TypeAlias
-
-from starlette.requests import Request
+from typing import NewType
 
 IdempotencyKey = NewType("IdempotencyKey", str)
 Fingerprint = NewType("Fingerprint", str)
-ScopeFactory: TypeAlias = Callable[[Request], str | Awaitable[str]]
 
 
 class IdempotencyState(str, Enum):
