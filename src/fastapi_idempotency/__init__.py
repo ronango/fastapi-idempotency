@@ -6,6 +6,7 @@ from .errors import (
     ConflictError,
     FingerprintMismatchError,
     IdempotencyError,
+    RequestTooLargeError,
     StoreError,
 )
 from .middleware import IdempotencyMiddleware
@@ -37,6 +38,7 @@ __all__ = [
     "IdempotencyRecord",
     "IdempotencyState",
     "InMemoryStore",
+    "RequestTooLargeError",
     "ScopeFactory",
     "Store",
     "StoreError",
