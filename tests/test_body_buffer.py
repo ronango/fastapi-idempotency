@@ -112,3 +112,25 @@ async def test_replay_raises_on_double_consume() -> None:
     await replay()
     with pytest.raises(RuntimeError):
         await replay()
+
+
+async def test_disconnect_mid_stream_returns_partial_body() -> None:
+    receive = make_receive(
+        [
+            {"type": "http.request", "body": b"part", "more_body": True},
+            {"type": "http.disconnect"},
+        ],
+    )
+
+    body, replay = await buffer_request_body(receive)
+
+    assert body == b"part"
+    assert (await replay())["body"] == b"part"
+
+
+async def test_immediate_disconnect_yields_empty_body() -> None:
+    receive = make_receive([{"type": "http.disconnect"}])
+
+    body, _ = await buffer_request_body(receive)
+
+    assert body == b""
