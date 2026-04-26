@@ -47,7 +47,13 @@ async def buffer_request_body(
 
 
 def _make_replay(body: bytes) -> Receive:
+    consumed = False
+
     async def replay() -> Message:
+        nonlocal consumed
+        if consumed:
+            raise RuntimeError("replay receive() called twice")
+        consumed = True
         return {"type": "http.request", "body": body, "more_body": False}
 
     return replay

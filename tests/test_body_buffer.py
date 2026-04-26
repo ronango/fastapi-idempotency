@@ -101,3 +101,14 @@ async def test_max_bytes_at_exactly_the_limit_passes() -> None:
     body, _ = await buffer_request_body(receive, max_bytes=100)
 
     assert len(body) == 100
+
+
+async def test_replay_raises_on_double_consume() -> None:
+    receive = make_receive(
+        [{"type": "http.request", "body": b"x", "more_body": False}],
+    )
+    _, replay = await buffer_request_body(receive)
+
+    await replay()
+    with pytest.raises(RuntimeError):
+        await replay()
