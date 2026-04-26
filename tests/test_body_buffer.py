@@ -46,3 +46,20 @@ async def test_single_chunk_body() -> None:
     replayed = await replay()
     assert replayed["body"] == b'{"id":1}'
     assert replayed["more_body"] is False
+
+
+async def test_multi_chunk_body_concatenates_in_order() -> None:
+    receive = make_receive(
+        [
+            {"type": "http.request", "body": b"hel", "more_body": True},
+            {"type": "http.request", "body": b"lo, ", "more_body": True},
+            {"type": "http.request", "body": b"world", "more_body": False},
+        ],
+    )
+
+    body, replay = await buffer_request_body(receive)
+
+    assert body == b"hello, world"
+    replayed = await replay()
+    assert replayed["body"] == b"hello, world"
+    assert replayed["more_body"] is False
