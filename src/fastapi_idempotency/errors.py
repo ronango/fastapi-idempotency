@@ -17,3 +17,7 @@ class FingerprintMismatchError(IdempotencyError):
 
 class StoreError(IdempotencyError):
     """The backing store failed (network, serialization, protocol error)."""
+
+
+class RequestTooLargeError(IdempotencyError):
+    """Request body exceeded the configured ``max_bytes`` while buffering."""
