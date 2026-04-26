@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, TypeAlias
+
+from starlette.requests import Request
 
 if TYPE_CHECKING:
     from starlette.types import ASGIApp, Receive, Scope, Send
 
     from .store import Store
-    from .types import ScopeFactory
+
+
+ScopeFactory: TypeAlias = Callable[[Request], str | Awaitable[str]]
+"""Function that derives a scope string (e.g. tenant, user) from the request.
+
+Called by the middleware before key lookup; the result is prefixed onto
+the idempotency key so different scopes don't collide.
+"""
 
 
 class IdempotencyMiddleware:

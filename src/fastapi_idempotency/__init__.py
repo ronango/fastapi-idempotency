@@ -9,7 +9,7 @@ from .errors import (
     RequestTooLargeError,
     StoreError,
 )
-from .middleware import IdempotencyMiddleware
+from .middleware import IdempotencyMiddleware, ScopeFactory
 from .store import Store
 from .stores.memory import InMemoryStore
 from .types import (
@@ -20,7 +20,6 @@ from .types import (
     IdempotencyKey,
     IdempotencyRecord,
     IdempotencyState,
-    ScopeFactory,
 )
 
 __version__ = "0.1.0.dev0"
