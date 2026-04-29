@@ -387,6 +387,63 @@ async def test_store_error_on_complete_adds_idempotency_stored_false_header() ->
     assert response.headers["idempotency-stored"] == "false"
 
 
+async def test_in_flight_ttl_expiry_reclaims_orphaned_slot() -> None:
+    """Crash-orphan recovery: a handler that runs longer than in_flight_ttl
+    loses its slot, so the next request gets a fresh CREATED instead of
+    being blocked by IN_FLIGHT or MISMATCH."""
+    invocations = 0
+
+    async def slow_handler(
+        _scope: Scope, receive: Receive, send: Send,
+    ) -> None:
+        nonlocal invocations
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                break
+            if not message.get("more_body", False):
+                break
+        invocations += 1
+        await asyncio.sleep(0.1)
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"text/plain")],
+            },
+        )
+        await send(
+            {"type": "http.response.body", "body": str(invocations).encode()},
+        )
+
+    middleware = IdempotencyMiddleware(
+        slow_handler, InMemoryStore(), in_flight_ttl=0.02,
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+
+        async def first() -> httpx.Response:
+            return await client.post(
+                "/", headers={"Idempotency-Key": "x"}, content=b"a",
+            )
+
+        async def second_after_ttl() -> httpx.Response:
+            await asyncio.sleep(0.05)  # > in_flight_ttl
+            return await client.post(
+                "/", headers={"Idempotency-Key": "x"}, content=b"a",
+            )
+
+        r1, r2 = await asyncio.gather(first(), second_after_ttl())
+
+    # Both ran the handler — second wasn't blocked by the still-running first.
+    assert invocations == 2
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+
+
 async def test_concurrent_request_with_same_key_returns_409() -> None:
     in_handler = asyncio.Event()
     can_finish = asyncio.Event()
