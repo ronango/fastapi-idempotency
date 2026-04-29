@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, ClassVar, TypeAlias
 
 from starlette.requests import Request
 
@@ -30,6 +30,10 @@ class IdempotencyMiddleware:
     response pass-through (v0.2.0) remains possible.
     """
 
+    NON_SAFE_METHODS: ClassVar[frozenset[str]] = frozenset(
+        {"POST", "PATCH", "PUT", "DELETE"},
+    )
+
     def __init__(
         self,
         app: ASGIApp,
@@ -48,4 +52,25 @@ class IdempotencyMiddleware:
         self.scope_factory = scope_factory
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        if scope["method"] not in self.NON_SAFE_METHODS:
+            await self.app(scope, receive, send)
+            return
+
+        if self._extract_key(scope) is None:
+            await self.app(scope, receive, send)
+            return
+
+        # TODO: full idempotency flow lands in subsequent slices.
         raise NotImplementedError
+
+    def _extract_key(self, scope: Scope) -> str | None:
+        target = self.header_name.lower().encode("latin-1")
+        headers: list[tuple[bytes, bytes]] = scope.get("headers", [])
+        for name, value in headers:
+            if name.lower() == target:
+                return value.decode("latin-1")
+        return None
