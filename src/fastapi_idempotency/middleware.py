@@ -7,8 +7,16 @@ from typing import TYPE_CHECKING, ClassVar, TypeAlias
 
 from starlette.requests import Request
 
+from .body_buffer import buffer_request_body
+from .fingerprint import compute_fingerprint
+from .types import (
+    AcquireOutcome,
+    CachedResponse,
+    IdempotencyKey,
+)
+
 if TYPE_CHECKING:
-    from starlette.types import ASGIApp, Receive, Scope, Send
+    from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
     from .store import Store
 
@@ -43,6 +51,7 @@ class IdempotencyMiddleware:
         header_name: str = "Idempotency-Key",
         in_flight_ttl: float = 30.0,
         completed_ttl: float = 86_400.0,
+        max_body_bytes: int | None = None,
         scope_factory: ScopeFactory | None = None,
     ) -> None:
         self.app = app
@@ -50,6 +59,7 @@ class IdempotencyMiddleware:
         self.header_name = header_name
         self.in_flight_ttl = in_flight_ttl
         self.completed_ttl = completed_ttl
+        self.max_body_bytes = max_body_bytes
         self.scope_factory = scope_factory
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -74,8 +84,44 @@ class IdempotencyMiddleware:
             )
             return
 
-        # TODO: full idempotency flow lands in subsequent slices.
+        key = IdempotencyKey(key_value)
+        body, replay = await buffer_request_body(
+            receive, max_bytes=self.max_body_bytes,
+        )
+        fingerprint = compute_fingerprint(
+            scope["method"],
+            scope["path"],
+            scope.get("query_string", b""),
+            body,
+        )
+
+        result = await self.store.acquire(
+            key, fingerprint, ttl=self.in_flight_ttl,
+        )
+
+        if result.outcome is AcquireOutcome.CREATED:
+            await self._run_and_cache(scope, replay, send, key)
+            return
+
+        # TODO(slice 5): handle IN_FLIGHT, REPLAY, MISMATCH.
         raise NotImplementedError
+
+    async def _run_and_cache(
+        self,
+        scope: Scope,
+        replay: Receive,
+        send: Send,
+        key: IdempotencyKey,
+    ) -> None:
+        capturer = _ResponseCapturer(send)
+        await self.app(scope, replay, capturer)
+
+        cached = CachedResponse(
+            status_code=capturer.status or 0,
+            headers=capturer.headers,
+            body=bytes(capturer.body),
+        )
+        await self.store.complete(key, cached, ttl=self.completed_ttl)
 
     def _extract_key(self, scope: Scope) -> str | None:
         target = self.header_name.lower().encode("latin-1")
@@ -110,3 +156,22 @@ class IdempotencyMiddleware:
         await send(
             {"type": "http.response.body", "body": body, "more_body": False},
         )
+
+
+class _ResponseCapturer:
+    """Wraps an ASGI ``send`` to forward messages downstream while
+    accumulating status, headers, and body for later caching."""
+
+    def __init__(self, downstream: Send) -> None:
+        self._downstream = downstream
+        self.status: int | None = None
+        self.headers: tuple[tuple[bytes, bytes], ...] = ()
+        self.body = bytearray()
+
+    async def __call__(self, message: Message) -> None:
+        if message["type"] == "http.response.start":
+            self.status = message["status"]
+            self.headers = tuple(message.get("headers", []))
+        elif message["type"] == "http.response.body":
+            self.body.extend(message.get("body", b""))
+        await self._downstream(message)

@@ -10,7 +10,12 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from fastapi_idempotency import IdempotencyMiddleware, InMemoryStore
+from fastapi_idempotency import (
+    IdempotencyKey,
+    IdempotencyMiddleware,
+    IdempotencyState,
+    InMemoryStore,
+)
 
 if TYPE_CHECKING:
     from starlette.types import Message, Receive, Scope, Send
@@ -118,3 +123,33 @@ async def test_empty_key_returns_400() -> None:
         )
 
     assert response.status_code == 400
+
+
+async def test_first_post_runs_handler_and_returns_response() -> None:
+    async with make_client(echo_app) as client:
+        response = await client.post(
+            "/", headers={"Idempotency-Key": "abc"}, content=b"hello",
+        )
+
+    assert response.status_code == 200
+    assert response.content == b"hello"
+
+
+async def test_first_post_stores_completed_record() -> None:
+    store = InMemoryStore()
+    middleware = IdempotencyMiddleware(echo_app, store)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        await client.post(
+            "/", headers={"Idempotency-Key": "abc"}, content=b"hello",
+        )
+
+    record = await store.get(IdempotencyKey("abc"))
+    assert record is not None
+    assert record.state is IdempotencyState.COMPLETED
+    assert record.response is not None
+    assert record.response.status_code == 200
+    assert record.response.body == b"hello"
