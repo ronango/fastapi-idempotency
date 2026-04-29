@@ -13,11 +13,15 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from fastapi_idempotency import (
+    CachedResponse,
+    Fingerprint,
     IdempotencyKey,
     IdempotencyMiddleware,
     IdempotencyState,
     InMemoryStore,
+    StoreError,
 )
+from fastapi_idempotency.types import AcquireResult, IdempotencyRecord
 
 if TYPE_CHECKING:
     from starlette.types import Message, Receive, Scope, Send
@@ -330,6 +334,57 @@ async def test_undersized_body_uses_idempotency() -> None:
         )
 
     assert await store.get(IdempotencyKey("x")) is not None
+
+
+async def test_store_error_on_complete_adds_idempotency_stored_false_header() -> None:
+    """If store.complete raises, the response is delivered with a header
+    flagging that retries won't replay."""
+
+    class FailingCompleteStore:
+        """Wraps an InMemoryStore but always raises on complete."""
+
+        def __init__(self) -> None:
+            self._inner = InMemoryStore()
+
+        async def acquire(
+            self,
+            key: IdempotencyKey,
+            fingerprint: Fingerprint,
+            ttl: float,
+        ) -> AcquireResult:
+            return await self._inner.acquire(key, fingerprint, ttl)
+
+        async def get(
+            self, key: IdempotencyKey,
+        ) -> IdempotencyRecord | None:
+            return await self._inner.get(key)
+
+        async def complete(
+            self,
+            key: IdempotencyKey,
+            response: CachedResponse,
+            ttl: float,
+        ) -> None:
+            del key, response, ttl
+            msg = "simulated eviction"
+            raise StoreError(msg)
+
+        async def release(self, key: IdempotencyKey) -> None:
+            await self._inner.release(key)
+
+    middleware = IdempotencyMiddleware(echo_app, FailingCompleteStore())
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            "/", headers={"Idempotency-Key": "x"}, content=b"hello",
+        )
+
+    assert response.status_code == 200
+    assert response.content == b"hello"
+    assert response.headers["idempotency-stored"] == "false"
 
 
 async def test_concurrent_request_with_same_key_returns_409() -> None:

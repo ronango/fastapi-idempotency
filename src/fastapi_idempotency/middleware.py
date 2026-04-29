@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, ClassVar, TypeAlias
 
 from starlette.requests import Request
 
 from .body_buffer import buffer_request_body
+from .errors import StoreError
 from .fingerprint import compute_fingerprint
 from .types import (
     AcquireOutcome,
@@ -19,6 +21,9 @@ if TYPE_CHECKING:
     from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
     from .store import Store
+
+
+logger = logging.getLogger(__name__)
 
 
 ScopeFactory: TypeAlias = Callable[[Request], str | Awaitable[str]]
@@ -152,11 +157,11 @@ class IdempotencyMiddleware:
         send: Send,
         key: IdempotencyKey,
     ) -> None:
-        capturer = _ResponseCapturer(send)
+        capturer = _ResponseCapturer()
         try:
             await self.app(scope, replay, capturer)
         except Exception:
-            # Handler raised before sending a response. Release the slot
+            # Handler raised before producing a response. Release the slot
             # so a retry can run fresh, then propagate.
             await self.store.release(key)
             raise
@@ -168,6 +173,7 @@ class IdempotencyMiddleware:
             # 5xx (or no response at all) is treated as a transient failure.
             # Don't cache it — drop the slot so a retry runs the handler again.
             await self.store.release(key)
+            await self._emit_captured(send, capturer)
             return
 
         cached = CachedResponse(
@@ -175,7 +181,43 @@ class IdempotencyMiddleware:
             headers=capturer.headers,
             body=bytes(capturer.body),
         )
-        await self.store.complete(key, cached, ttl=self.completed_ttl)
+        extra_headers: tuple[tuple[bytes, bytes], ...] = ()
+        try:
+            await self.store.complete(key, cached, ttl=self.completed_ttl)
+        except StoreError:
+            # Per the deferred decision in issue #3: the request itself
+            # succeeded; surface the storage failure to the client via a
+            # header so retries know they won't replay.
+            logger.warning(
+                "store.complete raised StoreError for key=%r; serving "
+                "uncached response with Idempotency-Stored: false",
+                key,
+            )
+            extra_headers = ((b"idempotency-stored", b"false"),)
+
+        await self._emit_captured(send, capturer, extra_headers=extra_headers)
+
+    @staticmethod
+    async def _emit_captured(
+        send: Send,
+        capturer: _ResponseCapturer,
+        *,
+        extra_headers: tuple[tuple[bytes, bytes], ...] = (),
+    ) -> None:
+        await send(
+            {
+                "type": "http.response.start",
+                "status": capturer.status or 0,
+                "headers": [*capturer.headers, *extra_headers],
+            },
+        )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": bytes(capturer.body),
+                "more_body": False,
+            },
+        )
 
     @staticmethod
     async def _replay_response(send: Send, cached: CachedResponse) -> None:
@@ -247,11 +289,15 @@ class IdempotencyMiddleware:
 
 
 class _ResponseCapturer:
-    """Wraps an ASGI ``send`` to forward messages downstream while
-    accumulating status, headers, and body for later caching."""
+    """Buffers status, headers, and body emitted by the wrapped app.
 
-    def __init__(self, downstream: Send) -> None:
-        self._downstream = downstream
+    The middleware emits the captured response to its own ``send`` after
+    it has decided whether to ``complete`` or ``release`` the slot —
+    that lets it amend headers (e.g., ``Idempotency-Stored: false``)
+    based on the storage outcome.
+    """
+
+    def __init__(self) -> None:
         self.status: int | None = None
         self.headers: tuple[tuple[bytes, bytes], ...] = ()
         self.body = bytearray()
@@ -262,4 +308,3 @@ class _ResponseCapturer:
             self.headers = tuple(message.get("headers", []))
         elif message["type"] == "http.response.body":
             self.body.extend(message.get("body", b""))
-        await self._downstream(message)
