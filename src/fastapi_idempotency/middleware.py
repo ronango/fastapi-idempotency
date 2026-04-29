@@ -95,7 +95,10 @@ class IdempotencyMiddleware:
             return
 
         await self._handle_intercepted(
-            scope, receive, send, IdempotencyKey(key_value),
+            scope,
+            receive,
+            send,
+            IdempotencyKey(key_value),
         )
 
     async def _handle_intercepted(
@@ -106,7 +109,8 @@ class IdempotencyMiddleware:
         key: IdempotencyKey,
     ) -> None:
         body, replay = await buffer_request_body(
-            receive, max_bytes=self.max_body_bytes,
+            receive,
+            max_bytes=self.max_body_bytes,
         )
         fingerprint = compute_fingerprint(
             scope["method"],
@@ -116,7 +120,9 @@ class IdempotencyMiddleware:
         )
 
         result = await self.store.acquire(
-            key, fingerprint, ttl=self.in_flight_ttl,
+            key,
+            fingerprint,
+            ttl=self.in_flight_ttl,
         )
 
         if result.outcome is AcquireOutcome.CREATED:
@@ -129,7 +135,9 @@ class IdempotencyMiddleware:
                 # Store contract says REPLAY → response is set; if we ever
                 # see this, it's a store bug. Treat as 500.
                 await self._send_plain_response(
-                    send, status=500, message="cached response missing",
+                    send,
+                    status=500,
+                    message="cached response missing",
                 )
                 return
             await self._replay_response(send, cached)
@@ -166,10 +174,7 @@ class IdempotencyMiddleware:
             await self.store.release(key)
             raise
 
-        if (
-            capturer.status is None
-            or capturer.status >= self.FIRST_SERVER_ERROR_STATUS
-        ):
+        if capturer.status is None or capturer.status >= self.FIRST_SERVER_ERROR_STATUS:
             # 5xx (or no response at all) is treated as a transient failure.
             # Don't cache it — drop the slot so a retry runs the handler again.
             await self.store.release(key)

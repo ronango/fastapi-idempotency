@@ -105,7 +105,9 @@ async def test_too_long_key_returns_400() -> None:
     long_key = "a" * 256
     async with make_client(echo_app) as client:
         response = await client.post(
-            "/", headers={"Idempotency-Key": long_key}, content=b"x",
+            "/",
+            headers={"Idempotency-Key": long_key},
+            content=b"x",
         )
 
     assert response.status_code == 400
@@ -125,7 +127,9 @@ async def test_empty_key_returns_400() -> None:
     """Empty header value fails the 1-255 length rule."""
     async with make_client(echo_app) as client:
         response = await client.post(
-            "/", headers={"Idempotency-Key": ""}, content=b"x",
+            "/",
+            headers={"Idempotency-Key": ""},
+            content=b"x",
         )
 
     assert response.status_code == 400
@@ -134,7 +138,9 @@ async def test_empty_key_returns_400() -> None:
 async def test_first_post_runs_handler_and_returns_response() -> None:
     async with make_client(echo_app) as client:
         response = await client.post(
-            "/", headers={"Idempotency-Key": "abc"}, content=b"hello",
+            "/",
+            headers={"Idempotency-Key": "abc"},
+            content=b"hello",
         )
 
     assert response.status_code == 200
@@ -150,7 +156,9 @@ async def test_first_post_stores_completed_record() -> None:
         base_url="http://testserver",
     ) as client:
         await client.post(
-            "/", headers={"Idempotency-Key": "abc"}, content=b"hello",
+            "/",
+            headers={"Idempotency-Key": "abc"},
+            content=b"hello",
         )
 
     record = await store.get(IdempotencyKey("abc"))
@@ -164,10 +172,14 @@ async def test_first_post_stores_completed_record() -> None:
 async def test_replay_returns_cached_response_with_replayed_header() -> None:
     async with make_client(echo_app) as client:
         first = await client.post(
-            "/", headers={"Idempotency-Key": "abc"}, content=b"hello",
+            "/",
+            headers={"Idempotency-Key": "abc"},
+            content=b"hello",
         )
         second = await client.post(
-            "/", headers={"Idempotency-Key": "abc"}, content=b"hello",
+            "/",
+            headers={"Idempotency-Key": "abc"},
+            content=b"hello",
         )
 
     assert first.status_code == 200
@@ -179,10 +191,14 @@ async def test_replay_returns_cached_response_with_replayed_header() -> None:
 async def test_same_key_different_body_returns_422() -> None:
     async with make_client(echo_app) as client:
         first = await client.post(
-            "/", headers={"Idempotency-Key": "abc"}, content=b"hello",
+            "/",
+            headers={"Idempotency-Key": "abc"},
+            content=b"hello",
         )
         second = await client.post(
-            "/", headers={"Idempotency-Key": "abc"}, content=b"world",
+            "/",
+            headers={"Idempotency-Key": "abc"},
+            content=b"world",
         )
 
     assert first.status_code == 200
@@ -193,7 +209,9 @@ async def test_5xx_response_releases_slot() -> None:
     """Server errors aren't cached — the slot is dropped so a retry runs fresh."""
 
     async def server_error_app(
-        _scope: Scope, receive: Receive, send: Send,
+        _scope: Scope,
+        receive: Receive,
+        send: Send,
     ) -> None:
         while True:
             message = await receive()
@@ -218,7 +236,9 @@ async def test_5xx_response_releases_slot() -> None:
         base_url="http://testserver",
     ) as client:
         response = await client.post(
-            "/", headers={"Idempotency-Key": "x"}, content=b"a",
+            "/",
+            headers={"Idempotency-Key": "x"},
+            content=b"a",
         )
 
     assert response.status_code == 500
@@ -230,7 +250,9 @@ async def test_5xx_then_retry_runs_handler_again() -> None:
     invocations = 0
 
     async def flaky_app(
-        _scope: Scope, receive: Receive, send: Send,
+        _scope: Scope,
+        receive: Receive,
+        send: Send,
     ) -> None:
         nonlocal invocations
         while True:
@@ -259,10 +281,14 @@ async def test_5xx_then_retry_runs_handler_again() -> None:
         base_url="http://testserver",
     ) as client:
         first = await client.post(
-            "/", headers={"Idempotency-Key": "x"}, content=b"a",
+            "/",
+            headers={"Idempotency-Key": "x"},
+            content=b"a",
         )
         second = await client.post(
-            "/", headers={"Idempotency-Key": "x"}, content=b"a",
+            "/",
+            headers={"Idempotency-Key": "x"},
+            content=b"a",
         )
 
     assert first.status_code == 500
@@ -275,7 +301,9 @@ async def test_handler_exception_releases_slot() -> None:
     """If the wrapped app raises before sending a response, release the slot."""
 
     async def boom_app(
-        _scope: Scope, receive: Receive, _send: Send,
+        _scope: Scope,
+        receive: Receive,
+        _send: Send,
     ) -> None:
         while True:
             message = await receive()
@@ -295,7 +323,9 @@ async def test_handler_exception_releases_slot() -> None:
     ) as client:
         with contextlib.suppress(Exception):
             await client.post(
-                "/", headers={"Idempotency-Key": "x"}, content=b"a",
+                "/",
+                headers={"Idempotency-Key": "x"},
+                content=b"a",
             )
 
     assert await store.get(IdempotencyKey("x")) is None
@@ -311,7 +341,9 @@ async def test_oversized_body_passes_through_without_idempotency() -> None:
         base_url="http://testserver",
     ) as client:
         response = await client.post(
-            "/", headers={"Idempotency-Key": "x"}, content=b"a" * 200,
+            "/",
+            headers={"Idempotency-Key": "x"},
+            content=b"a" * 200,
         )
 
     assert response.status_code == 200
@@ -330,7 +362,9 @@ async def test_undersized_body_uses_idempotency() -> None:
         base_url="http://testserver",
     ) as client:
         await client.post(
-            "/", headers={"Idempotency-Key": "x"}, content=b"a" * 50,
+            "/",
+            headers={"Idempotency-Key": "x"},
+            content=b"a" * 50,
         )
 
     assert await store.get(IdempotencyKey("x")) is not None
@@ -355,7 +389,8 @@ async def test_store_error_on_complete_adds_idempotency_stored_false_header() ->
             return await self._inner.acquire(key, fingerprint, ttl)
 
         async def get(
-            self, key: IdempotencyKey,
+            self,
+            key: IdempotencyKey,
         ) -> IdempotencyRecord | None:
             return await self._inner.get(key)
 
@@ -379,7 +414,9 @@ async def test_store_error_on_complete_adds_idempotency_stored_false_header() ->
         base_url="http://testserver",
     ) as client:
         response = await client.post(
-            "/", headers={"Idempotency-Key": "x"}, content=b"hello",
+            "/",
+            headers={"Idempotency-Key": "x"},
+            content=b"hello",
         )
 
     assert response.status_code == 200
@@ -394,7 +431,9 @@ async def test_in_flight_ttl_expiry_reclaims_orphaned_slot() -> None:
     invocations = 0
 
     async def slow_handler(
-        _scope: Scope, receive: Receive, send: Send,
+        _scope: Scope,
+        receive: Receive,
+        send: Send,
     ) -> None:
         nonlocal invocations
         while True:
@@ -417,7 +456,9 @@ async def test_in_flight_ttl_expiry_reclaims_orphaned_slot() -> None:
         )
 
     middleware = IdempotencyMiddleware(
-        slow_handler, InMemoryStore(), in_flight_ttl=0.02,
+        slow_handler,
+        InMemoryStore(),
+        in_flight_ttl=0.02,
     )
 
     async with httpx.AsyncClient(
@@ -427,13 +468,17 @@ async def test_in_flight_ttl_expiry_reclaims_orphaned_slot() -> None:
 
         async def first() -> httpx.Response:
             return await client.post(
-                "/", headers={"Idempotency-Key": "x"}, content=b"a",
+                "/",
+                headers={"Idempotency-Key": "x"},
+                content=b"a",
             )
 
         async def second_after_ttl() -> httpx.Response:
             await asyncio.sleep(0.05)  # > in_flight_ttl
             return await client.post(
-                "/", headers={"Idempotency-Key": "x"}, content=b"a",
+                "/",
+                headers={"Idempotency-Key": "x"},
+                content=b"a",
             )
 
         r1, r2 = await asyncio.gather(first(), second_after_ttl())
@@ -473,14 +518,18 @@ async def test_concurrent_request_with_same_key_returns_409() -> None:
 
         async def first() -> httpx.Response:
             return await client.post(
-                "/", headers={"Idempotency-Key": "x"}, content=b"a",
+                "/",
+                headers={"Idempotency-Key": "x"},
+                content=b"a",
             )
 
         async def second() -> httpx.Response:
             await in_handler.wait()
             try:
                 return await client.post(
-                    "/", headers={"Idempotency-Key": "x"}, content=b"a",
+                    "/",
+                    headers={"Idempotency-Key": "x"},
+                    content=b"a",
                 )
             finally:
                 can_finish.set()
