@@ -85,6 +85,10 @@ class IdempotencyMiddleware:
             )
             return
 
+        if self._content_length_exceeds_limit(scope):
+            await self.app(scope, receive, send)
+            return
+
         await self._handle_intercepted(
             scope, receive, send, IdempotencyKey(key_value),
         )
@@ -202,6 +206,22 @@ class IdempotencyMiddleware:
     def _is_valid_key(self, value: str) -> bool:
         # Per IETF draft: ASCII, 1..MAX_KEY_LENGTH chars.
         return 1 <= len(value) <= self.MAX_KEY_LENGTH and value.isascii()
+
+    def _content_length_exceeds_limit(self, scope: Scope) -> bool:
+        # Pre-check: if Content-Length declares a body bigger than the
+        # configured limit, skip idempotency entirely. We can't recover
+        # mid-buffer, so this header is the only fence we trust.
+        if self.max_body_bytes is None:
+            return False
+        headers: list[tuple[bytes, bytes]] = scope.get("headers", [])
+        for name, value in headers:
+            if name.lower() == b"content-length":
+                try:
+                    declared = int(value)
+                except ValueError:
+                    return False
+                return declared > self.max_body_bytes
+        return False
 
     @staticmethod
     async def _send_plain_response(

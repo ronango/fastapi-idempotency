@@ -297,6 +297,41 @@ async def test_handler_exception_releases_slot() -> None:
     assert await store.get(IdempotencyKey("x")) is None
 
 
+async def test_oversized_body_passes_through_without_idempotency() -> None:
+    """Content-Length over max_body_bytes → handler runs, no slot recorded."""
+    store = InMemoryStore()
+    middleware = IdempotencyMiddleware(echo_app, store, max_body_bytes=100)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            "/", headers={"Idempotency-Key": "x"}, content=b"a" * 200,
+        )
+
+    assert response.status_code == 200
+    assert response.content == b"a" * 200
+    # Nothing was recorded — idempotency was skipped.
+    assert await store.get(IdempotencyKey("x")) is None
+
+
+async def test_undersized_body_uses_idempotency() -> None:
+    """Sanity: when Content-Length is within the limit, the slot is recorded."""
+    store = InMemoryStore()
+    middleware = IdempotencyMiddleware(echo_app, store, max_body_bytes=100)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        await client.post(
+            "/", headers={"Idempotency-Key": "x"}, content=b"a" * 50,
+        )
+
+    assert await store.get(IdempotencyKey("x")) is not None
+
+
 async def test_concurrent_request_with_same_key_returns_409() -> None:
     in_handler = asyncio.Event()
     can_finish = asyncio.Event()
