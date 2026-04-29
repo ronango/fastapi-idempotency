@@ -42,6 +42,7 @@ class IdempotencyMiddleware:
         {"POST", "PATCH", "PUT", "DELETE"},
     )
     MAX_KEY_LENGTH: ClassVar[int] = 255
+    FIRST_SERVER_ERROR_STATUS: ClassVar[int] = 500
 
     def __init__(
         self,
@@ -148,10 +149,25 @@ class IdempotencyMiddleware:
         key: IdempotencyKey,
     ) -> None:
         capturer = _ResponseCapturer(send)
-        await self.app(scope, replay, capturer)
+        try:
+            await self.app(scope, replay, capturer)
+        except Exception:
+            # Handler raised before sending a response. Release the slot
+            # so a retry can run fresh, then propagate.
+            await self.store.release(key)
+            raise
+
+        if (
+            capturer.status is None
+            or capturer.status >= self.FIRST_SERVER_ERROR_STATUS
+        ):
+            # 5xx (or no response at all) is treated as a transient failure.
+            # Don't cache it — drop the slot so a retry runs the handler again.
+            await self.store.release(key)
+            return
 
         cached = CachedResponse(
-            status_code=capturer.status or 0,
+            status_code=capturer.status,
             headers=capturer.headers,
             body=bytes(capturer.body),
         )

@@ -7,6 +7,7 @@ edge cases like non-HTTP scope types.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -182,6 +183,118 @@ async def test_same_key_different_body_returns_422() -> None:
 
     assert first.status_code == 200
     assert second.status_code == 422
+
+
+async def test_5xx_response_releases_slot() -> None:
+    """Server errors aren't cached — the slot is dropped so a retry runs fresh."""
+
+    async def server_error_app(
+        _scope: Scope, receive: Receive, send: Send,
+    ) -> None:
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                break
+            if not message.get("more_body", False):
+                break
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 500,
+                "headers": [(b"content-type", b"text/plain")],
+            },
+        )
+        await send({"type": "http.response.body", "body": b"oops"})
+
+    store = InMemoryStore()
+    middleware = IdempotencyMiddleware(server_error_app, store)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            "/", headers={"Idempotency-Key": "x"}, content=b"a",
+        )
+
+    assert response.status_code == 500
+    assert await store.get(IdempotencyKey("x")) is None
+
+
+async def test_5xx_then_retry_runs_handler_again() -> None:
+    """After 5xx, the slot is gone — a retry hits the handler, not REPLAY."""
+    invocations = 0
+
+    async def flaky_app(
+        _scope: Scope, receive: Receive, send: Send,
+    ) -> None:
+        nonlocal invocations
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                break
+            if not message.get("more_body", False):
+                break
+        invocations += 1
+        status = 500 if invocations == 1 else 200
+        await send(
+            {
+                "type": "http.response.start",
+                "status": status,
+                "headers": [(b"content-type", b"text/plain")],
+            },
+        )
+        await send(
+            {"type": "http.response.body", "body": str(invocations).encode()},
+        )
+
+    middleware = IdempotencyMiddleware(flaky_app, InMemoryStore())
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        first = await client.post(
+            "/", headers={"Idempotency-Key": "x"}, content=b"a",
+        )
+        second = await client.post(
+            "/", headers={"Idempotency-Key": "x"}, content=b"a",
+        )
+
+    assert first.status_code == 500
+    assert second.status_code == 200
+    assert second.text == "2"
+    assert invocations == 2
+
+
+async def test_handler_exception_releases_slot() -> None:
+    """If the wrapped app raises before sending a response, release the slot."""
+
+    async def boom_app(
+        _scope: Scope, receive: Receive, _send: Send,
+    ) -> None:
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                break
+            if not message.get("more_body", False):
+                break
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    store = InMemoryStore()
+    middleware = IdempotencyMiddleware(boom_app, store)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        with contextlib.suppress(Exception):
+            await client.post(
+                "/", headers={"Idempotency-Key": "x"}, content=b"a",
+            )
+
+    assert await store.get(IdempotencyKey("x")) is None
 
 
 async def test_concurrent_request_with_same_key_returns_409() -> None:
