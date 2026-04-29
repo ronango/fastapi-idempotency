@@ -84,7 +84,17 @@ class IdempotencyMiddleware:
             )
             return
 
-        key = IdempotencyKey(key_value)
+        await self._handle_intercepted(
+            scope, receive, send, IdempotencyKey(key_value),
+        )
+
+    async def _handle_intercepted(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        key: IdempotencyKey,
+    ) -> None:
         body, replay = await buffer_request_body(
             receive, max_bytes=self.max_body_bytes,
         )
@@ -103,8 +113,32 @@ class IdempotencyMiddleware:
             await self._run_and_cache(scope, replay, send, key)
             return
 
-        # TODO(slice 5): handle IN_FLIGHT, REPLAY, MISMATCH.
-        raise NotImplementedError
+        if result.outcome is AcquireOutcome.REPLAY:
+            cached = result.record.response
+            if cached is None:
+                # Store contract says REPLAY → response is set; if we ever
+                # see this, it's a store bug. Treat as 500.
+                await self._send_plain_response(
+                    send, status=500, message="cached response missing",
+                )
+                return
+            await self._replay_response(send, cached)
+            return
+
+        if result.outcome is AcquireOutcome.IN_FLIGHT:
+            await self._send_plain_response(
+                send,
+                status=409,
+                message="request with this Idempotency-Key is in progress",
+            )
+            return
+
+        # MISMATCH
+        await self._send_plain_response(
+            send,
+            status=422,
+            message="Idempotency-Key reused with a different request body",
+        )
 
     async def _run_and_cache(
         self,
@@ -122,6 +156,24 @@ class IdempotencyMiddleware:
             body=bytes(capturer.body),
         )
         await self.store.complete(key, cached, ttl=self.completed_ttl)
+
+    @staticmethod
+    async def _replay_response(send: Send, cached: CachedResponse) -> None:
+        headers = [*cached.headers, (b"idempotent-replayed", b"true")]
+        await send(
+            {
+                "type": "http.response.start",
+                "status": cached.status_code,
+                "headers": headers,
+            },
+        )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": cached.body,
+                "more_body": False,
+            },
+        )
 
     def _extract_key(self, scope: Scope) -> str | None:
         target = self.header_name.lower().encode("latin-1")

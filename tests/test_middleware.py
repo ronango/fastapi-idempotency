@@ -6,6 +6,7 @@ edge cases like non-HTTP scope types.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -153,3 +154,78 @@ async def test_first_post_stores_completed_record() -> None:
     assert record.response is not None
     assert record.response.status_code == 200
     assert record.response.body == b"hello"
+
+
+async def test_replay_returns_cached_response_with_replayed_header() -> None:
+    async with make_client(echo_app) as client:
+        first = await client.post(
+            "/", headers={"Idempotency-Key": "abc"}, content=b"hello",
+        )
+        second = await client.post(
+            "/", headers={"Idempotency-Key": "abc"}, content=b"hello",
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.content == b"hello"
+    assert second.headers["idempotent-replayed"] == "true"
+
+
+async def test_same_key_different_body_returns_422() -> None:
+    async with make_client(echo_app) as client:
+        first = await client.post(
+            "/", headers={"Idempotency-Key": "abc"}, content=b"hello",
+        )
+        second = await client.post(
+            "/", headers={"Idempotency-Key": "abc"}, content=b"world",
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 422
+
+
+async def test_concurrent_request_with_same_key_returns_409() -> None:
+    in_handler = asyncio.Event()
+    can_finish = asyncio.Event()
+
+    async def slow_app(scope: Scope, receive: Receive, send: Send) -> None:
+        # Drain the request body so the middleware can buffer-and-replay.
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                break
+            if not message.get("more_body", False):
+                break
+
+        in_handler.set()
+        await can_finish.wait()
+
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"text/plain")],
+            },
+        )
+        await send({"type": "http.response.body", "body": b"slow"})
+
+    async with make_client(slow_app) as client:
+
+        async def first() -> httpx.Response:
+            return await client.post(
+                "/", headers={"Idempotency-Key": "x"}, content=b"a",
+            )
+
+        async def second() -> httpx.Response:
+            await in_handler.wait()
+            try:
+                return await client.post(
+                    "/", headers={"Idempotency-Key": "x"}, content=b"a",
+                )
+            finally:
+                can_finish.set()
+
+        r1, r2 = await asyncio.gather(first(), second())
+
+    assert r1.status_code == 200
+    assert r2.status_code == 409
