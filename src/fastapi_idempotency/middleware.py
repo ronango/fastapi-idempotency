@@ -33,6 +33,7 @@ class IdempotencyMiddleware:
     NON_SAFE_METHODS: ClassVar[frozenset[str]] = frozenset(
         {"POST", "PATCH", "PUT", "DELETE"},
     )
+    MAX_KEY_LENGTH: ClassVar[int] = 255
 
     def __init__(
         self,
@@ -60,8 +61,17 @@ class IdempotencyMiddleware:
             await self.app(scope, receive, send)
             return
 
-        if self._extract_key(scope) is None:
+        key_value = self._extract_key(scope)
+        if key_value is None:
             await self.app(scope, receive, send)
+            return
+
+        if not self._is_valid_key(key_value):
+            await self._send_plain_response(
+                send,
+                status=400,
+                message="invalid Idempotency-Key",
+            )
             return
 
         # TODO: full idempotency flow lands in subsequent slices.
@@ -74,3 +84,29 @@ class IdempotencyMiddleware:
             if name.lower() == target:
                 return value.decode("latin-1")
         return None
+
+    def _is_valid_key(self, value: str) -> bool:
+        # Per IETF draft: ASCII, 1..MAX_KEY_LENGTH chars.
+        return 1 <= len(value) <= self.MAX_KEY_LENGTH and value.isascii()
+
+    @staticmethod
+    async def _send_plain_response(
+        send: Send,
+        *,
+        status: int,
+        message: str,
+    ) -> None:
+        body = message.encode("utf-8")
+        await send(
+            {
+                "type": "http.response.start",
+                "status": status,
+                "headers": [
+                    (b"content-type", b"text/plain; charset=utf-8"),
+                    (b"content-length", str(len(body)).encode("ascii")),
+                ],
+            },
+        )
+        await send(
+            {"type": "http.response.body", "body": body, "more_body": False},
+        )

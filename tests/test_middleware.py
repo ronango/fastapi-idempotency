@@ -88,3 +88,33 @@ async def test_non_http_scope_passes_through() -> None:
     await middleware(scope, _noop_receive, _noop_send)
 
     assert seen_scopes == ["lifespan"]
+
+
+async def test_too_long_key_returns_400() -> None:
+    long_key = "a" * 256
+    async with make_client(echo_app) as client:
+        response = await client.post(
+            "/", headers={"Idempotency-Key": long_key}, content=b"x",
+        )
+
+    assert response.status_code == 400
+    assert response.text == "invalid Idempotency-Key"
+
+
+async def test_non_ascii_key_returns_400() -> None:
+    # Bypass httpx's str-to-ASCII encoding by sending raw bytes.
+    headers = httpx.Headers([(b"Idempotency-Key", b"\xf1")])
+    async with make_client(echo_app) as client:
+        response = await client.post("/", headers=headers, content=b"x")
+
+    assert response.status_code == 400
+
+
+async def test_empty_key_returns_400() -> None:
+    """Empty header value fails the 1-255 length rule."""
+    async with make_client(echo_app) as client:
+        response = await client.post(
+            "/", headers={"Idempotency-Key": ""}, content=b"x",
+        )
+
+    assert response.status_code == 400
