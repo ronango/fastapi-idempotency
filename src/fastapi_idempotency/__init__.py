@@ -9,7 +9,7 @@ from .errors import (
     RequestTooLargeError,
     StoreError,
 )
-from .middleware import IdempotencyMiddleware, ScopeFactory
+from .middleware import IdempotencyMiddleware
 from .store import Store
 from .stores.memory import InMemoryStore
 from .types import (
@@ -38,7 +38,6 @@ __all__ = [
     "IdempotencyState",
     "InMemoryStore",
     "RequestTooLargeError",
-    "ScopeFactory",
     "Store",
     "StoreError",
     "__version__",
