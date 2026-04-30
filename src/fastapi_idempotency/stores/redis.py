@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from redis.asyncio import Redis
 
 
-class RedisStore:
+class RedisStore:  # pragma: no cover
     """Distributed store backed by Redis.
 
     Atomicity of :meth:`acquire` and :meth:`complete` is implemented with
@@ -29,6 +29,12 @@ class RedisStore:
     cannot race on the same key.
 
     Structurally conforms to :class:`fastapi_idempotency.store.Store`.
+
+    .. note::
+        Stub in v0.1.0 — every method raises :class:`NotImplementedError`.
+        Real implementation lands in v0.2.0; ``# pragma: no cover`` on the
+        class lets v0.1.0 coverage stay honest. Remove the pragma when
+        the class becomes functional.
     """
 
     def __init__(self, client: Redis, *, namespace: str = "idem") -> None:
