@@ -13,8 +13,14 @@
 Install (the package is on TestPyPI while in pre-release):
 
 ```bash
-pip install -i https://test.pypi.org/simple/ fastapi-idempotency
+pip install \
+  --index-url https://test.pypi.org/simple/ \
+  --extra-index-url https://pypi.org/simple/ \
+  fastapi-idempotency
 ```
+
+`--extra-index-url` lets pip resolve runtime dependencies (`starlette`,
+`msgpack`) from real PyPI, since TestPyPI mirrors only this package.
 
 ### FastAPI
 
