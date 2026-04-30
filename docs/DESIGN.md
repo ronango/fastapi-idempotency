@@ -51,7 +51,59 @@ every call with `try/except`.
 
 ## Body fingerprint scope
 
-_To be written during v0.1.0._
+**Status: v0.1.0.**
+
+Fingerprint is computed over `method + path + query_string + body`,
+length-prefixed and SHA-256 hashed. Each component carries
+request-identity that the body alone doesn't.
+
+### Why include each piece
+
+- **Body**: the obvious one — same key with different payload should
+  reject (`422 MISMATCH`). Without body in the fingerprint, an attacker
+  who guessed someone's `Idempotency-Key` could submit a different body
+  and get the original response replayed.
+- **Path**: `POST /charges` and `POST /refunds` carrying the same body
+  are different operations. A naive client might reuse a key across
+  them; the path-level distinction prevents accidental cross-endpoint
+  collision.
+- **Method**: `POST /resource` and `DELETE /resource` are different
+  intents. Including method makes the fingerprint match exactly one
+  semantic operation.
+- **Query string**: typically carries semantics (`?dry_run=true`,
+  `?tenant=acme`, pagination cursors). Two requests differing only in
+  query parameters are different operations and should not collide.
+
+### Why length-prefix each component
+
+Naive concatenation is ambiguous when component boundaries fall
+anywhere in the byte stream. Body bytes are fully attacker-controlled
+and can mimic the tail of any other component. For instance:
+
+- `path="/orders/12"` + `body=b"3"`
+- `path="/orders/123"` + `body=b""`
+
+Both yield the byte stream `"/orders/123"` after concatenation —
+identical hash, despite being different requests. Length-prefixing
+each component before feeding it to the hasher makes the boundary
+explicit, so prefix-aligned splits cannot collide.
+
+(The same is true in theory for `method`/`path` boundaries, but in
+practice HTTP methods are a fixed alphabet validated by the server
+before middleware runs — that boundary isn't attacker-reachable.
+Body is.)
+
+### What is _not_ in the fingerprint
+
+- **Headers** (other than `Idempotency-Key` itself): too volatile.
+  `User-Agent`, `Accept-Language`, `X-Request-ID` would all change
+  per-retry and break the matching guarantee. If header-based identity
+  matters (e.g. tenant via `X-Tenant-Id`), use a `scope_factory`
+  (planned for v0.3.0).
+- **Time / nonce**: the whole point is determinism — two identical
+  requests must produce the same fingerprint.
+- **Source IP**: same reasoning as headers — too volatile and not
+  intent-bearing.
 
 ## Streaming response pass-through
 
