@@ -205,12 +205,8 @@ class IdempotencyMiddleware:
         )
 
     def _extract_key(self, scope: Scope) -> str | None:
-        target = self.header_name.lower().encode("latin-1")
-        headers: list[tuple[bytes, bytes]] = scope.get("headers", [])
-        for name, value in headers:
-            if name.lower() == target:
-                return value.decode("latin-1")
-        return None
+        raw = self._get_header(scope, self.header_name.encode("latin-1"))
+        return raw.decode("latin-1") if raw is not None else None
 
     def _is_valid_key(self, value: str) -> bool:
         # Per IETF draft: ASCII, 1..MAX_KEY_LENGTH chars.
@@ -222,15 +218,29 @@ class IdempotencyMiddleware:
         # mid-buffer, so this header is the only fence we trust.
         if self.max_body_bytes is None:
             return False
+        raw = self._get_header(scope, b"content-length")
+        if raw is None:
+            return False
+        try:
+            declared = int(raw)
+        except ValueError:
+            return False
+        return declared > self.max_body_bytes
+
+    @staticmethod
+    def _get_header(scope: Scope, name: bytes) -> bytes | None:
+        """Return the first header matching ``name`` (case-insensitive).
+
+        ASGI delivers headers as a list of ``(bytes, bytes)`` tuples
+        with names lowercased by the server, but lower-casing both sides
+        keeps the helper safe regardless of the caller's input.
+        """
+        target = name.lower()
         headers: list[tuple[bytes, bytes]] = scope.get("headers", [])
-        for name, value in headers:
-            if name.lower() == b"content-length":
-                try:
-                    declared = int(value)
-                except ValueError:
-                    return False
-                return declared > self.max_body_bytes
-        return False
+        for header_name, header_value in headers:
+            if header_name.lower() == target:
+                return header_value
+        return None
 
     @staticmethod
     async def _send_response(
