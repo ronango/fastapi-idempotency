@@ -34,10 +34,10 @@ dependencies = [
 redis = ["redis>=5.0"]
 
 [project.urls]
-Homepage = "https://github.com/hbunio/fastapi-idempotency"
-Repository = "https://github.com/hbunio/fastapi-idempotency"
-Issues = "https://github.com/hbunio/fastapi-idempotency/issues"
-Changelog = "https://github.com/hbunio/fastapi-idempotency/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/ronango/fastapi-idempotency"
+Repository = "https://github.com/ronango/fastapi-idempotency"
+Issues = "https://github.com/ronango/fastapi-idempotency/issues"
+Changelog = "https://github.com/ronango/fastapi-idempotency/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
