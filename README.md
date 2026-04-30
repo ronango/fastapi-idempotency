@@ -8,6 +8,80 @@
 
 **Pre-release / experimental.** The public API is not stable; expect breaking changes before v0.2.0. Do not use in production yet.
 
+## Quickstart
+
+Install (the package is on TestPyPI while in pre-release):
+
+```bash
+pip install -i https://test.pypi.org/simple/ fastapi-idempotency
+```
+
+### FastAPI
+
+```python
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+from fastapi_idempotency import IdempotencyMiddleware, InMemoryStore
+
+
+class Order(BaseModel):
+    item_id: int
+    quantity: int
+
+
+app = FastAPI()
+app.add_middleware(IdempotencyMiddleware, store=InMemoryStore())
+
+
+@app.post("/orders")
+async def create_order(order: Order) -> dict[str, int]:
+    # Your business logic — runs at most once per Idempotency-Key.
+    return {"id": 42, "item_id": order.item_id}
+```
+
+Send the same request twice with `Idempotency-Key: abc-123`:
+
+- The first call runs the handler and returns `{"id": 42, ...}`.
+- The second call returns the same body with `Idempotent-Replayed: true` —
+  no second insert, no second charge.
+
+### Starlette
+
+```python
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+
+from fastapi_idempotency import IdempotencyMiddleware, InMemoryStore
+
+
+async def create_order(request):
+    body = await request.json()
+    return JSONResponse({"id": 42, "item_id": body["item_id"]})
+
+
+app = Starlette(routes=[Route("/orders", create_order, methods=["POST"])])
+app = IdempotencyMiddleware(app, InMemoryStore())
+```
+
+## How it works
+
+The middleware watches non-safe HTTP methods (POST/PATCH/PUT/DELETE) for
+the `Idempotency-Key` header. Outcomes:
+
+| Situation | What the client sees |
+| --- | --- |
+| First request with a given key | Handler runs; response is returned and cached. |
+| Same key + same body, while the first is still in flight | `409 Conflict` |
+| Same key + same body, after the first completed | Cached response with `Idempotent-Replayed: true` header |
+| Same key + different body | `422 Unprocessable Entity` |
+| Handler returned 5xx | Slot released; a retry will run the handler again. |
+| Handler succeeded but the store failed to persist | Response delivered with `Idempotency-Stored: false` header |
+
+Safe methods (GET/HEAD/OPTIONS), requests without an `Idempotency-Key`,
+and requests over `max_body_bytes` pass through untouched.
+
 ## Roadmap
 
 - **v0.1.0** — minimal working version: in-memory store, middleware core, fingerprint, two-phase TTL, replay path, basic error handling. Publish to TestPyPI.
