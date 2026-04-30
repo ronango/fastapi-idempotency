@@ -127,7 +127,12 @@ class IdempotencyMiddleware:
                     message="cached response missing",
                 )
                 return
-            await self._replay_response(send, cached)
+            await self._send_response(
+                send,
+                status=cached.status_code,
+                headers=[*cached.headers, (b"idempotent-replayed", b"true")],
+                body=cached.body,
+            )
             return
 
         if result.outcome is AcquireOutcome.IN_FLIGHT:
@@ -165,7 +170,12 @@ class IdempotencyMiddleware:
             # 5xx (or no response at all) is treated as a transient failure.
             # Don't cache it — drop the slot so a retry runs the handler again.
             await self.store.release(key)
-            await self._emit_captured(send, capturer)
+            await self._send_response(
+                send,
+                status=capturer.status or 0,
+                headers=list(capturer.headers),
+                body=bytes(capturer.body),
+            )
             return
 
         cached = CachedResponse(
@@ -173,7 +183,7 @@ class IdempotencyMiddleware:
             headers=capturer.headers,
             body=bytes(capturer.body),
         )
-        extra_headers: tuple[tuple[bytes, bytes], ...] = ()
+        extra_headers: list[tuple[bytes, bytes]] = []
         try:
             await self.store.complete(key, cached, ttl=self.completed_ttl)
         except StoreError:
@@ -185,48 +195,13 @@ class IdempotencyMiddleware:
                 "uncached response with Idempotency-Stored: false",
                 key,
             )
-            extra_headers = ((b"idempotency-stored", b"false"),)
+            extra_headers = [(b"idempotency-stored", b"false")]
 
-        await self._emit_captured(send, capturer, extra_headers=extra_headers)
-
-    @staticmethod
-    async def _emit_captured(
-        send: Send,
-        capturer: _ResponseCapturer,
-        *,
-        extra_headers: tuple[tuple[bytes, bytes], ...] = (),
-    ) -> None:
-        await send(
-            {
-                "type": "http.response.start",
-                "status": capturer.status or 0,
-                "headers": [*capturer.headers, *extra_headers],
-            },
-        )
-        await send(
-            {
-                "type": "http.response.body",
-                "body": bytes(capturer.body),
-                "more_body": False,
-            },
-        )
-
-    @staticmethod
-    async def _replay_response(send: Send, cached: CachedResponse) -> None:
-        headers = [*cached.headers, (b"idempotent-replayed", b"true")]
-        await send(
-            {
-                "type": "http.response.start",
-                "status": cached.status_code,
-                "headers": headers,
-            },
-        )
-        await send(
-            {
-                "type": "http.response.body",
-                "body": cached.body,
-                "more_body": False,
-            },
+        await self._send_response(
+            send,
+            status=capturer.status,
+            headers=[*capturer.headers, *extra_headers],
+            body=bytes(capturer.body),
         )
 
     def _extract_key(self, scope: Scope) -> str | None:
@@ -258,25 +233,46 @@ class IdempotencyMiddleware:
         return False
 
     @staticmethod
+    async def _send_response(
+        send: Send,
+        *,
+        status: int,
+        headers: list[tuple[bytes, bytes]],
+        body: bytes,
+    ) -> None:
+        """Emit a complete ASGI response (start + body, no streaming)."""
+        await send(
+            {
+                "type": "http.response.start",
+                "status": status,
+                "headers": headers,
+            },
+        )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": body,
+                "more_body": False,
+            },
+        )
+
     async def _send_plain_response(
+        self,
         send: Send,
         *,
         status: int,
         message: str,
     ) -> None:
+        """Send a plain-text response with the given status and message body."""
         body = message.encode("utf-8")
-        await send(
-            {
-                "type": "http.response.start",
-                "status": status,
-                "headers": [
-                    (b"content-type", b"text/plain; charset=utf-8"),
-                    (b"content-length", str(len(body)).encode("ascii")),
-                ],
-            },
-        )
-        await send(
-            {"type": "http.response.body", "body": body, "more_body": False},
+        await self._send_response(
+            send,
+            status=status,
+            headers=[
+                (b"content-type", b"text/plain; charset=utf-8"),
+                (b"content-length", str(len(body)).encode("ascii")),
+            ],
+            body=body,
         )
 
 
