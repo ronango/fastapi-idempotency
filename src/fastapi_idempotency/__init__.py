@@ -34,7 +34,7 @@ from .types import (
     IdempotencyState as IdempotencyState,
 )
 
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.0"
 
 __all__ = [
     "ConflictError",

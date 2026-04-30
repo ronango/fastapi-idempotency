@@ -37,8 +37,7 @@ jobs:
       - name: mypy --strict
         run: uv run mypy src tests
       - name: pytest
-        # TODO(v0.1.0): drop --cov-fail-under=0 once real tests land; pyproject enforces 95%.
-        run: uv run pytest --cov --cov-fail-under=0 -m "not redis"
+        run: uv run pytest --cov -m "not redis"
       - name: pip-audit
         # Audit only what users will install: runtime deps + optional extras.
         # Dev tools (pip-audit, pytest, mypy, ruff) are excluded — their CVEs
