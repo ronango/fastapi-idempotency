@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, ClassVar, TypeAlias
-
-from starlette.requests import Request
+from typing import TYPE_CHECKING, ClassVar
 
 from .body_buffer import buffer_request_body
 from .errors import StoreError
@@ -24,14 +21,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-
-
-ScopeFactory: TypeAlias = Callable[[Request], str | Awaitable[str]]
-"""Function that derives a scope string (e.g. tenant, user) from the request.
-
-Called by the middleware before key lookup; the result is prefixed onto
-the idempotency key so different scopes don't collide.
-"""
 
 
 class IdempotencyMiddleware:
@@ -58,7 +47,6 @@ class IdempotencyMiddleware:
         in_flight_ttl: float = 30.0,
         completed_ttl: float = 86_400.0,
         max_body_bytes: int | None = None,
-        scope_factory: ScopeFactory | None = None,
     ) -> None:
         self.app = app
         self.store = store
@@ -66,7 +54,6 @@ class IdempotencyMiddleware:
         self.in_flight_ttl = in_flight_ttl
         self.completed_ttl = completed_ttl
         self.max_body_bytes = max_body_bytes
-        self.scope_factory = scope_factory
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
