@@ -105,6 +105,56 @@ Body is.)
 - **Source IP**: same reasoning as headers — too volatile and not
   intent-bearing.
 
+## Time source for the Redis backend
+
+**Status: v0.2.0.**
+
+`RedisStore` mixes two clocks deliberately:
+
+- **TTL eviction** is server-side: `PEXPIRE` on the Redis key gives Redis
+  full control over when the record disappears. No Python clock involvement
+  in eviction means workers can't disagree on "is this slot still alive?"
+  during a brownout.
+- **Record fields** (`created_at`, `expires_at` inside
+  `IdempotencyRecord`) are computed in Python via `time.time()` before
+  encoding.
+
+### Why not use `redis.call('TIME')` for record fields too
+
+The Lua acquire script can read Redis server time via `TIME`, and an
+earlier draft of v0.2.0 planned to inject server timestamps into every
+new record. The implementation revealed the cost: for Lua to set
+`created_at`/`expires_at` _inside_ the msgpack-encoded record, one of:
+
+1. Re-encode the record server-side via `cmsgpack` — but Lua's msgpack
+   library and Python's `msgpack` library disagree on float encoding
+   (subnormal handling, NaN representation). Cross-language drift would
+   break round-trip determinism (which we lock down via a test in
+   `_serde.py`).
+2. Store timestamps as separate Hash fields outside the msgpack blob,
+   and splice them into the decoded record Python-side. Significant
+   `_serde.py` changes for a marginal benefit.
+
+The benefit at issue: clock drift between workers. On NTP-synced hosts
+the drift is milliseconds; v0.2.0's smallest TTL default is 30 s
+(in-flight), 24 h (completed). A ms-scale skew on a 30 s TTL is 0.03 %.
+
+**Trade-off accepted**: Python-clock `created_at`/`expires_at` with
+documented NTP-sync requirement, in exchange for keeping `_serde.py` and
+the Lua script simple. The Redis-side `PEXPIRE` is the real eviction
+authority — record fields are advisory metadata for the application
+layer, not the source of truth for "is this expired".
+
+### Operational notes
+
+- **TTL metrics**: operators monitoring "time-to-eviction" should query
+  Redis `PTTL` directly, not compute `record.expires_at - time.time()`.
+  The record fields can drift on NTP step adjustments and would page on
+  spurious negative values.
+- **Cluster routing**: the acquire Lua script touches a single key
+  (`{namespace}:{key}`), so it is safe under Redis Cluster routing —
+  no cross-slot operations.
+
 ## Streaming response pass-through
 
 _To be written during v0.2.0._
