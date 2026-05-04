@@ -174,16 +174,17 @@ class RedisStore:  # pragma: no cover
 
     Atomic ``acquire`` is implemented as a single Lua ``EVAL`` so concurrent
     workers cannot race on the same key. ``get`` / ``complete`` / ``release``
-    arrive in the next slice.
+    are straightforward HSET/HGET/DEL paths — only ``acquire`` needs Lua.
 
     Structurally conforms to :class:`fastapi_idempotency.store.Store`.
 
     .. note::
-        Implementation in progress (issue #17). Methods other than
-        ``acquire`` raise :class:`NotImplementedError` until the next
-        slice. ``# pragma: no cover`` stays on until the cross-store
-        conformance suite (slice 5) exercises this class against a real
-        Redis via testcontainers.
+        ``# pragma: no cover`` stays on until slice 8 wires a redis job
+        into CI. The cross-store conformance suite (slice 5) and
+        concurrency/TTL slices (6, 7) exercise this class against a
+        testcontainers Redis locally, but CI runs
+        ``pytest --cov -m "not redis"`` until the redis job lands —
+        without the pragma, the 95% coverage gate would block merges.
     """
 
     def __init__(self, client: Redis, *, namespace: str = "idem") -> None:
