@@ -14,9 +14,13 @@ import re
 import pytest
 import redis.asyncio
 
-from fastapi_idempotency import AcquireOutcome
+from fastapi_idempotency import AcquireOutcome, IdempotencyKey, StoreError
 from fastapi_idempotency.stores import redis as redis_module
-from fastapi_idempotency.stores.redis import _ACQUIRE_LUA, RedisStore
+from fastapi_idempotency.stores.redis import (
+    _ACQUIRE_LUA,
+    RedisStore,
+    _wrap_redis_error,
+)
 
 
 def test_redis_store_module_imports() -> None:
@@ -60,3 +64,31 @@ def test_lua_outcome_strings_match_enum_values() -> None:
     expected = {outcome.value for outcome in AcquireOutcome}
 
     assert found == expected
+
+
+def test_namespacing_uses_default_prefix() -> None:
+    """Stored Redis keys are prefixed with ``{namespace}:``."""
+    client = redis.asyncio.Redis()
+    store = RedisStore(client)
+
+    # ``_key`` is private, but the formatting is part of the wire contract
+    # operators rely on for Redis introspection (KEYS pattern, SCAN, etc.).
+    assert store._key(IdempotencyKey("abc-123")) == "idem:abc-123"
+
+
+def test_namespacing_uses_custom_prefix() -> None:
+    client = redis.asyncio.Redis()
+    store = RedisStore(client, namespace="myapp")
+
+    assert store._key(IdempotencyKey("abc-123")) == "myapp:abc-123"
+
+
+def test_wrap_redis_error_returns_store_error_with_op_in_message() -> None:
+    """Each method's except sites translate redis-py exceptions to StoreError
+    with the op name in the message — operators get a breadcrumb without
+    parsing the traceback."""
+    err = _wrap_redis_error("acquire", RuntimeError("connection refused"))
+
+    assert isinstance(err, StoreError)
+    assert "Redis acquire failed" in str(err)
+    assert "connection refused" in str(err)

@@ -52,7 +52,9 @@ exhausts the default 50-connection pool and surfaces as raw
 
 from __future__ import annotations
 
+import logging
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 try:
@@ -79,6 +81,22 @@ from fastapi_idempotency.types import (
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
+
+
+logger = logging.getLogger(__name__)
+
+
+def _wrap_redis_error(op: str, exc: BaseException) -> StoreError:
+    """Wrap a redis-py exception as :class:`StoreError`.
+
+    Logs at DEBUG so operators flipping to debug level get a breadcrumb
+    before the StoreError bubbles up to the middleware. Truncated repr
+    defends against log-volume DoS via attacker-crafted multi-MB exception
+    text.
+    """
+    logger.debug("redis %s failed: %r", op, exc)
+    msg = f"Redis {op} failed: {repr(exc)[:200]}"
+    return StoreError(msg)
 
 
 # Atomic acquire as a single Lua call — classifies into one of four
@@ -125,6 +143,32 @@ return {'replay', existing_data}
 """
 
 
+# Atomic complete: validates the slot still exists (TTL race may have
+# evicted it between Python's read and this script), then writes the new
+# state + data and refreshes TTL to ``completed_ttl``. Returns 'ok' on
+# success, ``redis.error_reply`` if the slot is gone.
+#
+#   KEYS: [1] full namespaced key
+#   ARGV: [1] new-record msgpack bytes, [2] ttl_ms (positive int)
+_COMPLETE_LUA = """
+local key = KEYS[1]
+local data = ARGV[1]
+local ttl_ms = tonumber(ARGV[2])
+
+if not ttl_ms or ttl_ms <= 0 then
+  return redis.error_reply('ttl_ms must be a positive integer')
+end
+
+if redis.call('EXISTS', key) == 0 then
+  return redis.error_reply('cannot complete unknown idempotency key')
+end
+
+redis.call('HSET', key, 'state', 'completed', 'data', data)
+redis.call('PEXPIRE', key, ttl_ms)
+return 'ok'
+"""
+
+
 class RedisStore:  # pragma: no cover
     """Distributed store backed by Redis.
 
@@ -154,6 +198,7 @@ class RedisStore:  # pragma: no cover
         self.client = client
         self.namespace = namespace
         self._acquire_script: Any = client.register_script(_ACQUIRE_LUA)
+        self._complete_script: Any = client.register_script(_COMPLETE_LUA)
 
     async def acquire(
         self,
@@ -184,8 +229,7 @@ class RedisStore:  # pragma: no cover
                 args=[str(fingerprint), ttl_ms, new_data],
             )
         except (RedisError, OSError) as exc:
-            msg = f"Redis acquire failed: {repr(exc)[:200]}"
-            raise StoreError(msg) from exc
+            raise _wrap_redis_error("acquire", exc) from exc
 
         outcome_raw, record_bytes = result
         outcome_value = (
@@ -199,7 +243,24 @@ class RedisStore:  # pragma: no cover
         return AcquireResult(outcome=outcome, record=record)
 
     async def get(self, key: IdempotencyKey) -> IdempotencyRecord | None:
-        raise NotImplementedError
+        full_key = self._key(key)
+        try:
+            # redis-py 5.x async-client typing is imprecise; runtime is awaitable.
+            data = await self.client.hget(full_key, "data")  # type: ignore[misc]
+        except (RedisError, OSError) as exc:
+            raise _wrap_redis_error("get", exc) from exc
+
+        if data is None:
+            return None
+
+        record = decode_record(data)
+        # Symmetry with InMemoryStore: filter expired records Python-side.
+        # Defense in depth — Redis PEXPIRE is the primary eviction path,
+        # but a millisecond-scale race between expiry and our read can
+        # surface a record that is already expired by client-side clock.
+        if record.is_expired(time.time()):
+            return None
+        return record
 
     async def complete(
         self,
@@ -207,10 +268,48 @@ class RedisStore:  # pragma: no cover
         response: CachedResponse,
         ttl: float,
     ) -> None:
-        raise NotImplementedError
+        # NOTE: this is a 2-RTT operation (HGET + Lua). Between the read and
+        # the script call, a TTL eviction + re-acquire could create a fresh
+        # slot at the same key — we'd then complete-overwrite that fresh
+        # slot's data. Matches InMemoryStore behavior (caller-owns-slot
+        # contract; race bounded by in_flight_ttl tuning). Tracked for both
+        # backends in a v0.3.0+ hardening pass.
+        full_key = self._key(key)
+
+        # Read existing to preserve identity (key, fingerprint, created_at).
+        try:
+            existing_data = await self.client.hget(full_key, "data")  # type: ignore[misc]
+        except (RedisError, OSError) as exc:
+            raise _wrap_redis_error("complete", exc) from exc
+
+        if existing_data is None:
+            msg = f"cannot complete unknown idempotency key: {key!r}"
+            raise StoreError(msg)
+
+        existing = decode_record(existing_data)
+        new_record = replace(
+            existing,
+            state=IdempotencyState.COMPLETED,
+            expires_at=time.time() + ttl,
+            response=response,
+        )
+        new_data = encode_record(new_record)
+
+        ttl_ms = int(ttl * 1000)
+        try:
+            await self._complete_script(
+                keys=[full_key],
+                args=[new_data, ttl_ms],
+            )
+        except (RedisError, OSError) as exc:
+            raise _wrap_redis_error("complete", exc) from exc
 
     async def release(self, key: IdempotencyKey) -> None:
-        raise NotImplementedError
+        full_key = self._key(key)
+        try:
+            await self.client.delete(full_key)
+        except (RedisError, OSError) as exc:
+            raise _wrap_redis_error("release", exc) from exc
 
     def _key(self, key: IdempotencyKey) -> str:
         return f"{self.namespace}:{key}"
