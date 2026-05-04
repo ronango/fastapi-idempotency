@@ -107,6 +107,22 @@ enable_error_code = ["redundant-expr", "truthy-bool", "possibly-undefined"]
 module = ["msgpack.*", "testcontainers.*"]
 ignore_missing_imports = true
 
+# redis-py 5.x async-client typing returns `Awaitable[T] | T` unions that
+# mypy can't narrow on `await`. Suppress at the test-module level instead
+# of per-call `# type: ignore[misc]`.
+#
+# Module names are bare (no `tests.` prefix) because `tests/` has no
+# `__init__.py` — mypy sees each test file as a top-level module. If
+# anyone adds `tests/__init__.py`, prepend `tests.` to each entry below
+# or the override silently stops matching and `[misc]` re-fires.
+[[tool.mypy.overrides]]
+module = [
+    "test_stores_redis",
+    "test_stores_redis_integration",
+    "conftest",
+]
+disable_error_code = ["misc"]
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 addopts = "-ra --strict-markers --strict-config"
