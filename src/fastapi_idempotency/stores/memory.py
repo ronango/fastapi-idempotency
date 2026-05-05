@@ -77,15 +77,25 @@ class InMemoryStore:
         ttl: float,
     ) -> None:
         async with self._lock:
+            now = time.time()
             existing = self._records.get(key)
-            if existing is None:
+            # Treat expired-but-not-yet-purged records as gone — keeps
+            # InMemory in line with Redis (PEXPIRE evicts and the Lua
+            # complete script's EXISTS check raises). Without this guard
+            # InMemory silently overwrites an expired in-flight slot
+            # with a fresh COMPLETED record, masking the in_flight_ttl
+            # tuning bug operators are supposed to see.
+            #
+            # Must run inside ``self._lock`` — moving this check outside
+            # the critical section reintroduces a TOCTOU silent-overwrite.
+            if existing is None or existing.is_expired(now):
                 raise StoreError(
                     f"cannot complete unknown idempotency key: {key!r}",
                 )
             self._records[key] = replace(
                 existing,
                 state=IdempotencyState.COMPLETED,
-                expires_at=time.time() + ttl,
+                expires_at=now + ttl,
                 response=response,
             )
 

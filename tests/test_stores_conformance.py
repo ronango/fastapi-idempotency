@@ -6,14 +6,13 @@ available (gated by the session-scoped ``redis_url`` fixture in
 ``conftest.py``). If a backend ever drifts from the :class:`Store`
 protocol, the entire suite catches it without test duplication.
 
-Slice 6 (concurrency: 10 coros → exactly one CREATED) and slice 7
-(TTL expiry under real time) build on this fixture. This slice covers
-acquire/get/complete/release classification, identity preservation,
-and state-machine edges (complete-after-release, acquire-after-release,
-double-release). Expired-record paths defer to slice 7 — InMemory's
-negative-TTL trick is rejected by ``RedisStore`` (the Lua acquire script
-rejects ``ttl_ms <= 0`` by design), so a real wait under a short positive
-TTL is the only portable approach.
+Slice 6 added single-process concurrency. Slice 7 (this) adds TTL
+expiry tests under real ``asyncio.sleep`` — InMemory's negative-TTL
+trick is rejected by ``RedisStore`` (the Lua acquire script rejects
+``ttl_ms <= 0`` by design), so a real wait under a short positive TTL
+is the only portable way to exercise expiry across both backends.
+TTL tests carry ``@pytest.mark.slow`` so quick dev runs can deselect
+them with ``pytest -m "not slow"``.
 """
 
 from __future__ import annotations
@@ -279,6 +278,71 @@ async def test_concurrent_acquire_yields_exactly_one_created(store: Store) -> No
     outcomes = Counter(r.outcome for r in results)
     assert outcomes[AcquireOutcome.CREATED] == 1
     assert outcomes[AcquireOutcome.IN_FLIGHT] == n - 1
+
+
+# ---------------------------------------------------------------------------
+# TTL expiry — real-time wait, only portable approach across backends
+# ---------------------------------------------------------------------------
+
+# 0.5s TTL + 0.7s sleep gives 0.2s margin — safe against CI jitter and
+# asyncio.sleep granularity. Lower would be faster but flaky.
+_TTL_S = 0.5
+_TTL_WAIT_S = 0.7
+
+
+@pytest.mark.slow
+async def test_get_returns_none_after_ttl_expires(store: Store) -> None:
+    """``get`` filters expired records — InMemory by Python clock,
+    Redis by PEXPIRE plus a Python-side ``is_expired`` defense in depth."""
+    await store.acquire(KEY, FP, ttl=_TTL_S)
+    await asyncio.sleep(_TTL_WAIT_S)
+
+    assert await store.get(KEY) is None
+
+
+@pytest.mark.slow
+async def test_acquire_after_ttl_expires_creates_fresh_slot(store: Store) -> None:
+    """Expired slots are reclaimed by the next ``acquire`` (lazy GC).
+
+    Closes the conformance gap from slice 5: the negative-TTL trick
+    (``ttl=-1.0``) is InMemory-only, so this expired-record reclaim
+    behavior couldn't be tested portably until a real wait was added.
+    """
+    await store.acquire(KEY, FP, ttl=_TTL_S)
+    await asyncio.sleep(_TTL_WAIT_S)
+
+    result = await store.acquire(KEY, FP, ttl=30.0)
+
+    assert result.outcome is AcquireOutcome.CREATED
+
+
+@pytest.mark.slow
+async def test_completed_record_expires_with_completed_ttl(store: Store) -> None:
+    """``complete``'s ``ttl`` argument actually drives expiry — separate
+    knob from ``acquire``'s in-flight ttl. Operators rely on this for
+    tuning replay-window length without touching in-flight semantics."""
+    await store.acquire(KEY, FP, ttl=30.0)
+    await store.complete(KEY, RESPONSE, ttl=_TTL_S)
+    await asyncio.sleep(_TTL_WAIT_S)
+
+    assert await store.get(KEY) is None
+
+
+@pytest.mark.slow
+async def test_complete_after_ttl_expires_raises(store: Store) -> None:
+    """Production race: in-flight TTL elapses before the handler finishes.
+
+    Both backends must raise — Redis via ``_COMPLETE_LUA``'s ``EXISTS``
+    check after PEXPIRE eviction, InMemory via the ``is_expired``
+    guard. Without this conformance test InMemory used to silently
+    overwrite the expired slot with a fresh COMPLETED record, hiding
+    the ``in_flight_ttl`` tuning bug operators are supposed to see.
+    """
+    await store.acquire(KEY, FP, ttl=_TTL_S)
+    await asyncio.sleep(_TTL_WAIT_S)
+
+    with pytest.raises(StoreError):
+        await store.complete(KEY, RESPONSE, ttl=3600.0)
 
 
 # ---------------------------------------------------------------------------

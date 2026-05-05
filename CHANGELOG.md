@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `InMemoryStore.complete` now raises `StoreError` on expired records
+  (matching `RedisStore` and the `Store` protocol contract). Previously
+  it silently overwrote the expired in-flight slot with a fresh
+  `COMPLETED` record, masking the `in_flight_ttl` tuning signal
+  operators are supposed to see (#17).
+
 ## [0.1.0] - 2026-04-30
 
 ### Added
