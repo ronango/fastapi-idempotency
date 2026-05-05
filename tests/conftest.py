@@ -37,12 +37,16 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Iterator
-from urllib.parse import urlparse
+from typing import TYPE_CHECKING
 
 import pytest
 import redis
-import redis.asyncio
 from testcontainers.redis import RedisContainer
+
+from _redis_helpers import make_async_client
+
+if TYPE_CHECKING:
+    import redis.asyncio
 
 # Pin the Redis image — alpine is ~5x smaller (faster CI pulls), and a
 # version tag defends against ``latest`` drift. Patch-level images
@@ -105,14 +109,10 @@ async def redis_client(redis_url: str) -> AsyncIterator[redis.asyncio.Redis]:
     """Async Redis client connected to the session-scoped container.
 
     ``FLUSHDB`` before each test ensures isolation between tests sharing
-    the same container instance. If the URL has no ``/<db>`` component,
-    defaults to DB 15 — see the module docstring for the destructive-
-    default rationale.
+    the same container instance. The DB-15-default rule lives in
+    ``make_async_client`` so the cross-process worker stays in sync.
     """
-    db_in_url = bool(urlparse(redis_url).path.lstrip("/"))
-    client = (
-        redis.asyncio.from_url(redis_url) if db_in_url else redis.asyncio.from_url(redis_url, db=15)
-    )
+    client = make_async_client(redis_url)
     try:
         await client.flushdb()
         yield client

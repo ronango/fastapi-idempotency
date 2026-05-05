@@ -18,7 +18,9 @@ TTL is the only portable approach.
 
 from __future__ import annotations
 
+import asyncio
 import time
+from collections import Counter
 from typing import TYPE_CHECKING
 
 import pytest
@@ -248,6 +250,35 @@ async def test_acquire_after_release_returns_created(store: Store) -> None:
     result = await store.acquire(KEY, Fingerprint("fp-different"), ttl=30.0)
 
     assert result.outcome is AcquireOutcome.CREATED
+
+
+# ---------------------------------------------------------------------------
+# concurrency — single-process race
+# ---------------------------------------------------------------------------
+
+
+async def test_concurrent_acquire_yields_exactly_one_created(store: Store) -> None:
+    """Single-process race on one key — exactly one wins CREATED.
+
+    Tests two different mechanisms in one shape:
+
+    - InMemoryStore: ``asyncio.Lock`` serializes critical sections in
+      the single event loop.
+    - RedisStore: the Lua ``acquire`` script is atomic on the Redis
+      server side (Redis is single-threaded for command execution),
+      so even N coroutines sharing one connection pool can't double-claim.
+
+    Cross-process atomicity (the property that justifies RedisStore over
+    InMemoryStore) is covered by ``test_stores_redis_concurrent.py``.
+    """
+    n = 10
+    results = await asyncio.gather(
+        *(store.acquire(KEY, FP, ttl=30.0) for _ in range(n)),
+    )
+
+    outcomes = Counter(r.outcome for r in results)
+    assert outcomes[AcquireOutcome.CREATED] == 1
+    assert outcomes[AcquireOutcome.IN_FLIGHT] == n - 1
 
 
 # ---------------------------------------------------------------------------
