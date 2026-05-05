@@ -78,13 +78,16 @@ class Store(Protocol):
 
         Preserves ``key``, ``fingerprint``, and ``created_at`` from the
         in-flight record; overwrites ``state``, ``expires_at``, and
-        ``response``.
+        ``response``. The new ``expires_at`` is ``now + ttl`` (this
+        ``ttl`` *replaces* any remaining acquire-phase TTL — eviction
+        is reseated, not extended).
 
         The caller must own the slot (i.e. previously received
         ``CREATED`` from ``acquire``). If no record exists for ``key``
-        — typically because the in-flight TTL elapsed before the handler
-        finished — the store raises :class:`StoreError`. Tune
-        ``in_flight_ttl`` upward if this fires in production.
+        — or the existing record has expired — the store raises
+        :class:`StoreError`. This typically means the in-flight TTL
+        elapsed before the handler finished; tune ``in_flight_ttl``
+        upward if this fires in production.
         """
         ...
 

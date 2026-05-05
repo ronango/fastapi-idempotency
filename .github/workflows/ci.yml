@@ -20,6 +20,22 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+    services:
+      redis:
+        image: redis:7.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    env:
+      # Bypass testcontainers via REDIS_URL; the service container above
+      # publishes 6379 on the runner's localhost. REDIS_TESTS_REQUIRED=1
+      # ensures a connectivity issue is a hard fail, not a silent skip.
+      REDIS_URL: redis://localhost:6379
+      REDIS_TESTS_REQUIRED: "1"
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
@@ -36,8 +52,18 @@ jobs:
         run: uv run ruff format --check .
       - name: mypy --strict
         run: uv run mypy src tests
-      - name: pytest
-        run: uv run pytest --cov -m "not redis"
+      - name: pytest (InMemory — independent of redis service)
+        # Runs first so a broken redis service container produces a clean
+        # "redis-only failure" signal instead of red-everything: InMemory
+        # tests still pass even if the next step can't reach Redis.
+        run: uv run pytest -m "not redis"
+      - name: pytest (full suite + coverage)
+        # Runs everything including @pytest.mark.redis and @pytest.mark.slow
+        # against the redis service container above. Coverage gate (95%)
+        # is enforced on every Python version — RedisStore parity bugs
+        # specific to 3.10/3.11/3.12 (e.g. async-semantics drift,
+        # redis-py edge cases) get caught here rather than at upgrade time.
+        run: uv run pytest --cov
       - name: pip-audit
         # Audit only what users will install: runtime deps + optional extras.
         # Dev tools (pip-audit, pytest, mypy, ruff) are excluded — their CVEs
