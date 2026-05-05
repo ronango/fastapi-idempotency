@@ -52,6 +52,11 @@ jobs:
         run: uv run ruff format --check .
       - name: mypy --strict
         run: uv run mypy src tests
+      - name: pytest (InMemory — independent of redis service)
+        # Runs first so a broken redis service container produces a clean
+        # "redis-only failure" signal instead of red-everything: InMemory
+        # tests still pass even if the next step can't reach Redis.
+        run: uv run pytest -m "not redis"
       - name: pytest (full suite + coverage)
         # Runs everything including @pytest.mark.redis and @pytest.mark.slow
         # against the redis service container above. Coverage gate (95%)
