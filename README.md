@@ -71,6 +71,49 @@ app = Starlette(routes=[Route("/orders", create_order, methods=["POST"])])
 app = IdempotencyMiddleware(app, InMemoryStore())
 ```
 
+### Redis (multi-worker / multi-process)
+
+`InMemoryStore` is single-process. For multi-worker deployments
+(uvicorn `--workers > 1`, gunicorn, k8s replicas) use `RedisStore` so
+all workers see the same idempotency state.
+
+Install with the `[redis]` extra:
+
+```bash
+pip install \
+  --index-url https://test.pypi.org/simple/ \
+  --extra-index-url https://pypi.org/simple/ \
+  'fastapi-idempotency[redis]'
+```
+
+```python
+import redis.asyncio
+
+from fastapi import FastAPI
+from fastapi_idempotency import IdempotencyMiddleware, RedisStore
+
+# Production-recommended client config — see RedisStore docstring for
+# the full rationale (connection-pool sizing, socket timeouts, etc).
+client = redis.asyncio.Redis(
+    connection_pool=redis.asyncio.BlockingConnectionPool(
+        max_connections=200,    # tune per RPS x p99 latency
+        timeout=2.0,            # bound queue wait on saturation
+    ),
+    socket_timeout=1.0,         # bound stalled-Redis cascades
+    socket_connect_timeout=1.0,
+)
+
+app = FastAPI()
+app.add_middleware(IdempotencyMiddleware, store=RedisStore(client))
+```
+
+Atomicity: `acquire` is a single Lua `EVAL`, so concurrent workers
+cannot double-claim a key. The client must be constructed with
+`decode_responses=False` (the default) — the codec operates on raw
+bytes and `decode_responses=True` would silently corrupt msgpack.
+TTL eviction uses Redis `PEXPIRE`; record fields are advisory metadata
+(query Redis `PTTL` for the eviction authority).
+
 ## How it works
 
 The middleware watches non-safe HTTP methods (POST/PATCH/PUT/DELETE) for

@@ -169,7 +169,7 @@ return 'ok'
 """
 
 
-class RedisStore:  # pragma: no cover
+class RedisStore:
     """Distributed store backed by Redis.
 
     Atomic ``acquire`` is implemented as a single Lua ``EVAL`` so concurrent
@@ -177,14 +177,6 @@ class RedisStore:  # pragma: no cover
     are straightforward HSET/HGET/DEL paths — only ``acquire`` needs Lua.
 
     Structurally conforms to :class:`fastapi_idempotency.store.Store`.
-
-    .. note::
-        ``# pragma: no cover`` stays on until slice 8 wires a redis job
-        into CI. The cross-store conformance suite (slice 5) and
-        concurrency/TTL slices (6, 7) exercise this class against a
-        testcontainers Redis locally, but CI runs
-        ``pytest --cov -m "not redis"`` until the redis job lands —
-        without the pragma, the 95% coverage gate would block merges.
     """
 
     def __init__(self, client: Redis, *, namespace: str = "idem") -> None:
@@ -288,10 +280,19 @@ class RedisStore:  # pragma: no cover
             raise StoreError(msg)
 
         existing = decode_record(existing_data)
+        # Defense in depth, symmetric with ``get``: PEXPIRE may not have
+        # fired yet on a sub-millisecond race, but the Python clock can
+        # already see ``expires_at`` elapsed. Treat that as gone (matches
+        # InMemoryStore's complete-on-expired guard from issue #17 / slice 7).
+        now = time.time()
+        if existing.is_expired(now):
+            msg = f"cannot complete unknown idempotency key: {key!r}"
+            raise StoreError(msg)
+
         new_record = replace(
             existing,
             state=IdempotencyState.COMPLETED,
-            expires_at=time.time() + ttl,
+            expires_at=now + ttl,
             response=response,
         )
         new_data = encode_record(new_record)

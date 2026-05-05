@@ -118,6 +118,7 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = [
     "test_stores_redis",
+    "test_stores_redis_concurrent",
     "test_stores_redis_integration",
     "conftest",
 ]
