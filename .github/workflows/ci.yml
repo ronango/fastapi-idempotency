@@ -20,39 +20,6 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-        with:
-          enable-cache: true
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
-      - name: Install dependencies
-        run: uv sync --frozen --all-extras --dev --python ${{ matrix.python-version }}
-      - name: ruff check
-        run: uv run ruff check .
-      - name: ruff format --check
-        run: uv run ruff format --check .
-      - name: mypy --strict
-        run: uv run mypy src tests
-      - name: pytest (InMemory only)
-        # Coverage gate lives in the check-redis job (which exercises
-        # RedisStore against a real Redis); this matrix proves the
-        # InMemory + middleware path on every supported Python.
-        run: uv run pytest -m "not redis"
-      - name: pip-audit
-        # Audit only what users will install: runtime deps + optional extras.
-        # Dev tools (pip-audit, pytest, mypy, ruff) are excluded — their CVEs
-        # don't ship to library consumers. --disable-pip: resolver reads
-        # pinned+hashed requirements, no network resolve.
-        run: |
-          uv export --frozen --no-emit-project --no-dev --all-extras --format requirements-txt \
-            | uv run pip-audit --strict --disable-pip -r /dev/stdin
-
-  check-redis:
-    runs-on: ubuntu-latest
-    needs: check
     services:
       redis:
         image: redis:7.2-alpine
@@ -75,13 +42,28 @@ jobs:
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
-      - name: Set up Python 3.13
-        run: uv python install 3.13
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
       - name: Install dependencies
-        run: uv sync --frozen --all-extras --dev --python 3.13
+        run: uv sync --frozen --all-extras --dev --python ${{ matrix.python-version }}
+      - name: ruff check
+        run: uv run ruff check .
+      - name: ruff format --check
+        run: uv run ruff format --check .
+      - name: mypy --strict
+        run: uv run mypy src tests
       - name: pytest (full suite + coverage)
-        # Runs everything including @pytest.mark.redis and @pytest.mark.slow.
-        # This is the gate for the 95% coverage threshold — ``RedisStore``
-        # is only exercised here, so this is the only job that can honestly
-        # measure full-package coverage.
+        # Runs everything including @pytest.mark.redis and @pytest.mark.slow
+        # against the redis service container above. Coverage gate (95%)
+        # is enforced on every Python version — RedisStore parity bugs
+        # specific to 3.10/3.11/3.12 (e.g. async-semantics drift,
+        # redis-py edge cases) get caught here rather than at upgrade time.
         run: uv run pytest --cov
+      - name: pip-audit
+        # Audit only what users will install: runtime deps + optional extras.
+        # Dev tools (pip-audit, pytest, mypy, ruff) are excluded — their CVEs
+        # don't ship to library consumers. --disable-pip: resolver reads
+        # pinned+hashed requirements, no network resolve.
+        run: |
+          uv export --frozen --no-emit-project --no-dev --all-extras --format requirements-txt \
+            | uv run pip-audit --strict --disable-pip -r /dev/stdin

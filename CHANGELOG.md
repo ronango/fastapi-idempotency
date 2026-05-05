@@ -42,11 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- CI now splits into a matrix `check` job (Python 3.10–3.13: ruff,
-  mypy, `pytest -m "not redis"`, pip-audit) and a single-Python
-  `check-redis` job that runs the full suite with coverage against a
-  Redis service container. The 95% coverage gate now lives in the
-  redis job (it's the only job that exercises `RedisStore`).
+- CI matrix now runs the full test suite (including `@pytest.mark.redis`
+  and `@pytest.mark.slow`) against a Redis service container on every
+  Python version (3.10–3.13). The 95% coverage gate fires on every
+  matrix job — RedisStore parity bugs specific to a single Python
+  version get caught at PR time rather than at upgrade time.
 
 ### Fixed
 
