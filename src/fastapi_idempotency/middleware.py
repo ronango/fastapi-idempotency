@@ -157,39 +157,59 @@ class IdempotencyMiddleware:
         send: Send,
         key: IdempotencyKey,
     ) -> None:
-        capturer = _ResponseCapturer()
+        interceptor = _ResponseInterceptor(send)
         try:
-            await self.app(scope, replay, capturer)
+            await self.app(scope, replay, interceptor)
         except Exception:
-            # Handler raised before producing a response. Release the slot
-            # so a retry can run fresh, then propagate.
+            logger.warning(
+                "exception inside intercepted handler for key=%r; releasing slot",
+                key,
+                exc_info=True,
+            )
             await self.store.release(key)
             raise
 
-        if capturer.status is None or capturer.status >= self.FIRST_SERVER_ERROR_STATUS:
-            # 5xx (or no response at all) is treated as a transient failure.
-            # Don't cache it — drop the slot so a retry runs the handler again.
+        if interceptor.streamed:
+            # Streams can't be cached — see ``CachedResponse`` invariant.
+            await self.store.release(key)
+            return
+
+        if interceptor.status is None:
+            # Handler returned without emitting http.response.start —
+            # synthesize a 500 so the wire contract holds.
+            logger.warning(
+                "handler returned without sending http.response.start for key=%r; emitting 500",
+                key,
+            )
+            await self.store.release(key)
+            await self._send_plain_response(
+                send,
+                status=500,
+                message="upstream handler emitted no response",
+                extra_headers=[(b"idempotency-stored", b"false")],
+            )
+            return
+
+        if interceptor.status >= self.FIRST_SERVER_ERROR_STATUS:
+            # 5xx is transient — drop the slot so a retry runs fresh.
             await self.store.release(key)
             await self._send_response(
                 send,
-                status=capturer.status or 0,
-                headers=list(capturer.headers),
-                body=bytes(capturer.body),
+                status=interceptor.status,
+                headers=list(interceptor.headers),
+                body=bytes(interceptor.body),
             )
             return
 
         cached = CachedResponse(
-            status_code=capturer.status,
-            headers=capturer.headers,
-            body=bytes(capturer.body),
+            status_code=interceptor.status,
+            headers=interceptor.headers,
+            body=bytes(interceptor.body),
         )
         extra_headers: list[tuple[bytes, bytes]] = []
         try:
             await self.store.complete(key, cached, ttl=self.completed_ttl)
         except StoreError:
-            # Per the deferred decision in issue #3: the request itself
-            # succeeded; surface the storage failure to the client via a
-            # header so retries know they won't replay.
             logger.warning(
                 "store.complete raised StoreError for key=%r; serving "
                 "uncached response with Idempotency-Stored: false",
@@ -199,9 +219,9 @@ class IdempotencyMiddleware:
 
         await self._send_response(
             send,
-            status=capturer.status,
-            headers=[*capturer.headers, *extra_headers],
-            body=bytes(capturer.body),
+            status=interceptor.status,
+            headers=[*interceptor.headers, *extra_headers],
+            body=bytes(interceptor.body),
         )
 
     def _extract_key(self, scope: Scope) -> str | None:
@@ -272,37 +292,72 @@ class IdempotencyMiddleware:
         *,
         status: int,
         message: str,
+        extra_headers: list[tuple[bytes, bytes]] | None = None,
     ) -> None:
         """Send a plain-text response with the given status and message body."""
         body = message.encode("utf-8")
+        headers: list[tuple[bytes, bytes]] = [
+            (b"content-type", b"text/plain; charset=utf-8"),
+            (b"content-length", str(len(body)).encode("ascii")),
+        ]
+        if extra_headers:
+            headers.extend(extra_headers)
         await self._send_response(
             send,
             status=status,
-            headers=[
-                (b"content-type", b"text/plain; charset=utf-8"),
-                (b"content-length", str(len(body)).encode("ascii")),
-            ],
+            headers=headers,
             body=body,
         )
 
 
-class _ResponseCapturer:
-    """Buffers status, headers, and body emitted by the wrapped app.
+class _ResponseInterceptor:
+    """Buffers a non-streaming response or forwards a streaming one live.
 
-    The middleware emits the captured response to its own ``send`` after
-    it has decided whether to ``complete`` or ``release`` the slot —
-    that lets it amend headers (e.g., ``Idempotency-Stored: false``)
-    based on the storage outcome.
+    See ``docs/DESIGN.md`` ("Streaming response pass-through") for the
+    deferred-start mechanism and the rationale for reusing
+    ``Idempotency-Stored: false`` on streamed responses.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, send: Send) -> None:
+        self._send = send
         self.status: int | None = None
         self.headers: tuple[tuple[bytes, bytes], ...] = ()
         self.body = bytearray()
+        self.streamed = False
+        self._pending_start: Message | None = None
 
     async def __call__(self, message: Message) -> None:
+        if self.streamed:
+            await self._send(message)
+            return
+
         if message["type"] == "http.response.start":
+            if self._pending_start is not None:
+                msg = "ASGI protocol violation: duplicate http.response.start"
+                raise RuntimeError(msg)
+            self._pending_start = message
             self.status = message["status"]
             self.headers = tuple(message.get("headers", []))
-        elif message["type"] == "http.response.body":
+            return
+
+        if message["type"] == "http.response.body":
+            more_body = message.get("more_body", False)
+            if more_body:
+                if self._pending_start is None:
+                    # Typed raise (not assert) so it survives ``python -O``.
+                    msg = "ASGI protocol violation: http.response.body before http.response.start"
+                    raise RuntimeError(msg)
+                patched_start: Message = dict(self._pending_start)
+                patched_headers = list(patched_start.get("headers", []))
+                patched_headers.append((b"idempotency-stored", b"false"))
+                patched_start["headers"] = patched_headers
+
+                self.streamed = True
+                self._pending_start = None
+                await self._send(patched_start)
+                await self._send(message)
+                return
+
+            # Cleared so the duplicate-start guard stays load-bearing.
+            self._pending_start = None
             self.body.extend(message.get("body", b""))

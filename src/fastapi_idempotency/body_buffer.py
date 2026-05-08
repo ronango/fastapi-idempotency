@@ -43,22 +43,30 @@ async def buffer_request_body(
             break
 
     body = b"".join(chunks)
-    return body, _Replay(body)
+    return body, _Replay(body, receive)
 
 
 class _Replay:
-    """One-shot ASGI ``receive`` yielding a buffered body once."""
+    """ASGI ``receive`` replay: yields the buffered body once, then forwards
+    subsequent calls to the original ``receive``.
 
-    def __init__(self, body: bytes) -> None:
+    Forwarding (rather than raising on the second call) keeps
+    disconnect-listening alive — Starlette's ``StreamingResponse``
+    starts a background ``receive()`` task that needs to observe
+    ``http.disconnect``.
+    """
+
+    def __init__(self, body: bytes, original: Receive) -> None:
         self._message: Message = {
             "type": "http.request",
             "body": body,
             "more_body": False,
         }
         self._consumed = False
+        self._original = original
 
     async def __call__(self) -> Message:
-        if self._consumed:
-            raise RuntimeError("replay receive() called twice")
-        self._consumed = True
-        return self._message
+        if not self._consumed:
+            self._consumed = True
+            return self._message
+        return await self._original()

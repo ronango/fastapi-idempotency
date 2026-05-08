@@ -33,6 +33,17 @@ class AcquireOutcome(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class CachedResponse:
+    """A complete, single-frame HTTP response captured for replay.
+
+    **Invariant: cached responses are never streams.** Streaming
+    responses (those emitting ``http.response.body`` with
+    ``more_body=True``) are forwarded live by the middleware and
+    never reach ``Store.complete`` — see
+    ``docs/DESIGN.md`` ("Streaming response pass-through"). REPLAY
+    paths can therefore emit a ``CachedResponse`` as a single
+    start+body frame without per-record streaming logic.
+    """
+
     status_code: int
     headers: tuple[tuple[bytes, bytes], ...]
     body: bytes
