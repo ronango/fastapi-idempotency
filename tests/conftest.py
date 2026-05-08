@@ -8,8 +8,8 @@ with a per-test ``FLUSHDB`` for isolation.
 If Docker is not available, ``redis_url`` skips dependent tests with a
 clear message rather than failing — local development without Docker is
 supported. In CI, set ``REDIS_TESTS_REQUIRED=1`` to convert the skip
-into a hard failure (slice 8 will export this in the redis job, so
-"Docker missing in CI" doesn't masquerade as a green build).
+into a hard failure so a missing-Docker CI doesn't masquerade as a
+green build.
 
 Set ``REDIS_URL`` to bypass the testcontainer entirely and point at an
 already-running Redis (e.g. a CI service container, or a local

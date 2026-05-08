@@ -94,14 +94,12 @@ class Store(Protocol):
     async def release(self, key: IdempotencyKey) -> None:
         """Remove the slot for ``key``; no-op if no record exists.
 
-        This is the explicit-cleanup path used when the handler raised
-        or returned an uncached status (5xx, redirects, etc.). Idempotent
-        by design so the middleware's error path can call it
+        Idempotent by design so the middleware's error path can call it
         unconditionally — it races with ``in_flight_ttl`` expiry, and
         raising on a missing record would crash the error handler.
 
-        Process crashes are handled passively by ``in_flight_ttl``
-        expiring the orphaned slot; stores do not need a separate
-        recovery mechanism.
+        Process crashes never call ``release``; orphaned slots are
+        recovered passively via the in-flight TTL. Stores need no
+        separate recovery mechanism.
         """
         ...

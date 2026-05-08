@@ -1,12 +1,10 @@
 """InMemoryStore-specific tests.
 
 Behavioral conformance against the :class:`Store` protocol lives in
-``tests/test_stores_conformance.py`` (parametrized over both backends);
-that file also covers single-process concurrency. This file holds
-tests that exercise InMemory-only mechanics — specifically the
-negative-``ttl`` shortcut for expired records, which RedisStore's Lua
-``acquire`` rejects (``ttl_ms <= 0``) by design. Slice 7 (issue #17)
-will add real-time TTL tests covering both backends.
+``tests/test_stores_conformance.py`` (parametrized over both backends).
+This file holds tests that exercise InMemory-only mechanics —
+specifically the negative-``ttl`` shortcut for expired records, which
+RedisStore's Lua ``acquire`` rejects (``ttl_ms <= 0``) by design.
 """
 
 from __future__ import annotations

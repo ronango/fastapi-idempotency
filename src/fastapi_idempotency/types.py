@@ -60,12 +60,7 @@ class IdempotencyRecord:
     response: CachedResponse | None = None
 
     def is_expired(self, now: float) -> bool:
-        """Whether ``expires_at`` has elapsed as of ``now``.
-
-        The clock is injected so the domain stays free of
-        ``time.time`` / ``time.monotonic`` calls; stores pass whichever
-        source they use for TTL math.
-        """
+        """Whether ``expires_at`` has elapsed as of injected ``now``."""
         return self.expires_at <= now
 
 

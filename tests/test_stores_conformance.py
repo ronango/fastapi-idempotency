@@ -302,12 +302,7 @@ async def test_get_returns_none_after_ttl_expires(store: Store) -> None:
 
 @pytest.mark.slow
 async def test_acquire_after_ttl_expires_creates_fresh_slot(store: Store) -> None:
-    """Expired slots are reclaimed by the next ``acquire`` (lazy GC).
-
-    Closes the conformance gap from slice 5: the negative-TTL trick
-    (``ttl=-1.0``) is InMemory-only, so this expired-record reclaim
-    behavior couldn't be tested portably until a real wait was added.
-    """
+    """Expired slots are reclaimed by the next ``acquire`` (lazy GC)."""
     await store.acquire(KEY, FP, ttl=_TTL_S)
     await asyncio.sleep(_TTL_WAIT_S)
 
