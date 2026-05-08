@@ -62,6 +62,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Chunked-transfer requests (no `Content-Length`) whose body exceeds
+  `max_body_bytes` now respond `413 Content Too Large` instead of
+  bubbling out as an unhandled `RequestTooLargeError` (which the ASGI
+  server reported as 500). The handler is not invoked and no
+  idempotency record is created. The `Content-Length` pre-check
+  pass-through behavior is unchanged (#19).
 - The internal request-body replay no longer raises `RuntimeError` on
   the second `receive()` call. Subsequent calls now forward to the
   original ASGI `receive`, so apps that listen for `http.disconnect`

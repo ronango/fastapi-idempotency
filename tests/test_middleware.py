@@ -24,6 +24,8 @@ from fastapi_idempotency import (
 from fastapi_idempotency.types import AcquireResult, IdempotencyRecord
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from starlette.types import Message, Receive, Scope, Send
 
 
@@ -350,6 +352,113 @@ async def test_oversized_body_passes_through_without_idempotency() -> None:
     assert response.content == b"a" * 200
     # Nothing was recorded — idempotency was skipped.
     assert await store.get(IdempotencyKey("x")) is None
+
+
+async def test_chunked_body_overflow_returns_413() -> None:
+    """Chunked-transfer body (no Content-Length) > max_body_bytes:
+    middleware catches ``RequestTooLargeError`` from ``buffer_request_body``
+    and responds 413 with a fixed message — no handler invocation, no
+    idempotency record."""
+    invocations = 0
+
+    async def counting_app(scope: Scope, receive: Receive, send: Send) -> None:
+        nonlocal invocations
+        invocations += 1
+        # Drain anyway so the test is honest about whether we got here.
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                break
+            if not message.get("more_body", False):
+                break
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"text/plain")],
+            },
+        )
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    store = InMemoryStore()
+    middleware = IdempotencyMiddleware(counting_app, store, max_body_bytes=100)
+
+    async def chunks() -> AsyncIterator[bytes]:
+        # Two 60-byte chunks → 120 bytes total > max_body_bytes=100.
+        # httpx omits Content-Length when content is an async iterator,
+        # so the Content-Length pre-check can't pass-through; the
+        # in-buffer fence is the only defense.
+        yield b"a" * 60
+        yield b"b" * 60
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            "/",
+            headers={"Idempotency-Key": "x"},
+            content=chunks(),
+        )
+
+    assert response.status_code == 413
+    assert response.text == "request body exceeds maximum allowed size"
+    assert invocations == 0
+    assert await store.get(IdempotencyKey("x")) is None
+
+
+async def test_single_oversized_chunk_returns_413() -> None:
+    """One chunk over the limit (no Content-Length): proves the in-buffer
+    fence checks per chunk, not just on the second."""
+    invocations = 0
+
+    async def counting_app(scope: Scope, receive: Receive, send: Send) -> None:
+        nonlocal invocations
+        invocations += 1
+        await echo_app(scope, receive, send)
+
+    store = InMemoryStore()
+    middleware = IdempotencyMiddleware(counting_app, store, max_body_bytes=100)
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield b"a" * 200
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            "/",
+            headers={"Idempotency-Key": "x"},
+            content=chunks(),
+        )
+
+    assert response.status_code == 413
+    assert response.text == "request body exceeds maximum allowed size"
+    assert invocations == 0
+
+
+async def test_chunked_body_at_exact_limit_passes() -> None:
+    """Boundary: ``total > max_bytes`` (strict greater-than) — a body of
+    exactly ``max_body_bytes`` must succeed."""
+    store = InMemoryStore()
+    middleware = IdempotencyMiddleware(echo_app, store, max_body_bytes=100)
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield b"a" * 100
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            "/",
+            headers={"Idempotency-Key": "x"},
+            content=chunks(),
+        )
+
+    assert response.status_code == 200
+    assert response.content == b"a" * 100
 
 
 async def test_undersized_body_uses_idempotency() -> None:

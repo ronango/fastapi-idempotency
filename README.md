@@ -127,6 +127,7 @@ the `Idempotency-Key` header. Outcomes:
 | Same key + different body | `422 Unprocessable Entity` |
 | Handler returned 5xx | Slot released; a retry will run the handler again. |
 | Handler returned a streaming response (`StreamingResponse`, SSE, file download) | Forwarded live; not cached. Slot released, retries run the handler again. |
+| Chunked-transfer body exceeds `max_body_bytes` | `413 Content Too Large`; handler not invoked, no slot created. |
 | Storage failed after a successful response, or any other path that won't replay on retry | `Idempotency-Stored: false` header on the response |
 
 The `Idempotency-Stored: false` header is a union signal: it appears
@@ -136,7 +137,10 @@ means the same thing for the caller: "this response will not replay
 on retry — the slot is gone."
 
 Safe methods (GET/HEAD/OPTIONS), requests without an `Idempotency-Key`,
-and requests over `max_body_bytes` pass through untouched.
+and requests whose `Content-Length` declares more than `max_body_bytes`
+pass through untouched (idempotency simply skipped). Chunked-transfer
+uploads (no `Content-Length`) over the limit get `413` instead — the
+in-buffer fence is the only defense when the header is absent.
 
 ## Roadmap
 

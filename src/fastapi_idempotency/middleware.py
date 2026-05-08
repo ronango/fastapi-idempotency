@@ -6,7 +6,7 @@ import logging
 from typing import TYPE_CHECKING, ClassVar
 
 from .body_buffer import buffer_request_body
-from .errors import StoreError
+from .errors import RequestTooLargeError, StoreError
 from .fingerprint import compute_fingerprint
 from .types import (
     AcquireOutcome,
@@ -94,10 +94,23 @@ class IdempotencyMiddleware:
         send: Send,
         key: IdempotencyKey,
     ) -> None:
-        body, replay = await buffer_request_body(
-            receive,
-            max_bytes=self.max_body_bytes,
-        )
+        try:
+            body, replay = await buffer_request_body(
+                receive,
+                max_bytes=self.max_body_bytes,
+            )
+        except RequestTooLargeError:
+            # Fixed message: never echo exception text or limit value to
+            # the client (defends against future leak via exception state).
+            # The remaining unread http.request messages are the ASGI
+            # server's responsibility — draining here would defeat
+            # early rejection of attack-sized bodies.
+            await self._send_plain_response(
+                send,
+                status=413,
+                message="request body exceeds maximum allowed size",
+            )
+            return
         fingerprint = compute_fingerprint(
             scope["method"],
             scope["path"],
