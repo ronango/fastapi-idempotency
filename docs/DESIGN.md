@@ -157,7 +157,56 @@ layer, not the source of truth for "is this expired".
 
 ## Streaming response pass-through
 
-_To be written during v0.2.0._
+**Status: v0.2.0.**
+
+The middleware can't cache a streaming response — by definition the
+body is produced incrementally, often larger than memory can buffer
+(SSE feeds, file downloads, long-poll). Buffering would either OOM
+the worker or delay the first byte until the stream finishes,
+defeating the point of streaming. Issue #18 chose to **forward live
+and skip caching**: the slot is released, the response carries
+`Idempotency-Stored: false`, and retries run the handler again.
+
+### Detection: deferred-start with one-tick peek
+
+ASGI delivers the response as a sequence of messages: one
+`http.response.start`, then one or more `http.response.body` with
+`more_body=True/False`. The streaming signal is `more_body=True` on
+the first body chunk — but by the time it arrives, `start` has
+typically already been forwarded, and we can no longer inject the
+`Idempotency-Stored` header into start's headers.
+
+Solution: `_ResponseInterceptor` defers `http.response.start` until the
+first body chunk. On `more_body=True` we patch the deferred start
+with the header and forward it live, followed by the body chunk;
+subsequent messages take the streaming branch and pass through
+verbatim. On `more_body=False` we treat the response as single-chunk,
+buffer the body, and let the middleware emit a fresh start+body pair
+after deciding cache vs. release (the v0.1.0 path).
+
+The deferral is "until the first body chunk" — possibly many
+event-loop ticks if the handler does work between `start` and the
+first body emission. Apps that emit `start` for back-pressure
+headers and only later produce data still work correctly: the
+detection waits for the first body, not a fixed time.
+
+### Why `Idempotency-Stored: false` is reused (not a new header)
+
+The semantic of `Idempotency-Stored: false` is "this response will
+not replay on retry — the slot is gone." That holds for both paths
+that emit it: storage failure (v0.1.0) and streaming pass-through
+(v0.2.0). Inventing a separate header (e.g., `Idempotency-Streamed`)
+would force clients to handle two signals carrying the same
+operational meaning. The header is documented as a union in README.
+
+### Invariant: cached responses are never streams
+
+`store.complete` is unreachable for streamed responses (`_run_and_cache`
+returns immediately on `interceptor.streamed`). So every `CachedResponse`
+in the store represents a single buffered frame — REPLAY can emit
+them via `_send_response` without per-record streaming logic. Future
+contributors adding a `complete_streaming` path would have to
+preserve this invariant or rework the REPLAY emit.
 
 ## Why msgpack over JSON
 

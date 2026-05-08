@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Streaming response pass-through (#18). FastAPI / Starlette
+  `StreamingResponse` (and any ASGI app emitting `more_body=True` on
+  the first body chunk) now flows through the middleware live instead
+  of being buffered into memory. Streamed responses carry an
+  `Idempotency-Stored: false` header so retries know they won't replay,
+  and the in-flight slot is released — a stream cannot be cached.
+  Detection defers `http.response.start` until the first body chunk
+  so the header can be injected before start hits the wire.
+  Non-streaming responses keep the v0.1.0 caching/replay behavior
+  unchanged. The `Idempotency-Stored: false` header now carries a
+  union meaning ("response will not replay on retry"): emitted both
+  for streaming pass-through and for the v0.1.0 storage-failure path.
 - `RedisStore` — distributed `Store` backend backed by Redis (#17).
   Atomic `acquire` via a single Lua `EVAL` so concurrent workers cannot
   double-claim a key; `get` / `complete` / `release` are straightforward
@@ -50,6 +62,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The internal request-body replay no longer raises `RuntimeError` on
+  the second `receive()` call. Subsequent calls now forward to the
+  original ASGI `receive`, so apps that listen for `http.disconnect`
+  during streaming (e.g. Starlette's `StreamingResponse` background
+  task) work correctly (#18).
 - `InMemoryStore.complete` now raises `StoreError` on expired records
   (matching `RedisStore` and the `Store` protocol contract). Previously
   it silently overwrote the expired in-flight slot with a fresh

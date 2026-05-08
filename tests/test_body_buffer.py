@@ -103,15 +103,26 @@ async def test_max_bytes_at_exactly_the_limit_passes() -> None:
     assert len(body) == 100
 
 
-async def test_replay_raises_on_double_consume() -> None:
+async def test_replay_yields_body_once_then_forwards_to_original_receive() -> None:
+    """``_Replay`` is no longer one-shot: subsequent calls fall through to
+    the original ``receive`` so disconnect-listening (e.g. from
+    Starlette's ``StreamingResponse``) still observes ``http.disconnect``.
+    """
     receive = make_receive(
-        [{"type": "http.request", "body": b"x", "more_body": False}],
+        [
+            {"type": "http.request", "body": b"x", "more_body": False},
+            # The original ``receive`` would normally block until disconnect;
+            # we feed an explicit disconnect to assert forwarding works.
+            {"type": "http.disconnect"},
+        ],
     )
     _, replay = await buffer_request_body(receive)
 
-    await replay()
-    with pytest.raises(RuntimeError):
-        await replay()
+    first = await replay()
+    assert first == {"type": "http.request", "body": b"x", "more_body": False}
+
+    second = await replay()
+    assert second == {"type": "http.disconnect"}
 
 
 async def test_disconnect_mid_stream_returns_partial_body() -> None:

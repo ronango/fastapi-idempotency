@@ -126,7 +126,14 @@ the `Idempotency-Key` header. Outcomes:
 | Same key + same body, after the first completed | Cached response with `Idempotent-Replayed: true` header |
 | Same key + different body | `422 Unprocessable Entity` |
 | Handler returned 5xx | Slot released; a retry will run the handler again. |
-| Handler succeeded but the store failed to persist | Response delivered with `Idempotency-Stored: false` header |
+| Handler returned a streaming response (`StreamingResponse`, SSE, file download) | Forwarded live; not cached. Slot released, retries run the handler again. |
+| Storage failed after a successful response, or any other path that won't replay on retry | `Idempotency-Stored: false` header on the response |
+
+The `Idempotency-Stored: false` header is a union signal: it appears
+on streaming pass-through, on storage-failure delivery, and on the
+synthesized 500 when the handler emits no response. In every case it
+means the same thing for the caller: "this response will not replay
+on retry — the slot is gone."
 
 Safe methods (GET/HEAD/OPTIONS), requests without an `Idempotency-Key`,
 and requests over `max_body_bytes` pass through untouched.
