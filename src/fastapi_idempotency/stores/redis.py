@@ -1,53 +1,20 @@
 """Redis-backed :class:`Store` implementation.
 
-Requires the ``redis`` extra::
+Requires the ``redis`` extra (``pip install fastapi-idempotency[redis]``).
 
-    pip install fastapi-idempotency[redis]
+Storage layout: one HASH per idempotency key at ``{namespace}:{key}``
+with fields ``fp`` / ``state`` / ``data`` (msgpack-encoded
+:class:`IdempotencyRecord`). TTL is server-side via ``PEXPIRE``.
+The Lua acquire script reads ``fp`` and ``state`` directly without
+parsing msgpack, keeping the critical section minimal.
 
-Storage layout: one HASH per idempotency key at ``{namespace}:{key}`` with
-fields ``fp`` (fingerprint hex string), ``state`` (enum value string), and
-``data`` (msgpack-encoded :class:`IdempotencyRecord`). The Lua acquire
-script reads ``fp`` and ``state`` directly without parsing msgpack,
-keeping the server-side critical section minimal. ``HMGET`` reads all
-three fields in one atomic snapshot, eliminating eviction-race holes
-between sequential ``HGET``\\s.
+The client must use ``decode_responses=False`` (the default); the
+codec operates on raw bytes. The caller owns client lifecycle. Tune
+``socket_timeout`` and use ``BlockingConnectionPool`` for production
+— see the Redis quickstart in ``README.md`` for a worked example.
 
-TTL is set via ``PEXPIRE`` on the key; Redis handles eviction. See
-``docs/DESIGN.md`` ("Time source for the Redis backend") for why
-``created_at``/``expires_at`` inside the record are Python-clock while
-TTL is Redis-clock.
-
-Operators monitoring TTL should query Redis ``PTTL`` directly rather
-than computing ``record.expires_at - time.time()`` — record fields are
-advisory metadata, not the eviction authority.
-
-The Lua script touches a single key, so it is safe under Redis Cluster
-routing (no cross-slot operations). ``register_script`` caches the
-script SHA1 locally; ``redis-py`` re-issues ``EVAL`` automatically on
-``NOSCRIPT`` (e.g. after ``SCRIPT FLUSH`` or replica failover).
-
-The caller owns the :class:`redis.asyncio.Redis` client lifecycle — we
-do not close it. The client must be constructed with
-``decode_responses=False`` (the default); the codec operates on raw
-bytes and a ``decode_responses=True`` client will silently corrupt
-msgpack payloads.
-
-Recommended production client configuration::
-
-    import redis.asyncio
-    client = redis.asyncio.Redis(
-        connection_pool=redis.asyncio.BlockingConnectionPool(
-            max_connections=200,    # tune per RPS x p99 latency
-            timeout=2.0,            # bound queue wait on saturation
-        ),
-        socket_timeout=1.0,         # bound stalled-Redis cascades
-        socket_connect_timeout=1.0,
-    )
-
-Without ``socket_timeout`` an unhealthy Redis blocks ``acquire``
-indefinitely; without ``BlockingConnectionPool`` a stalled Redis
-exhausts the default 50-connection pool and surfaces as raw
-``ConnectionError``.
+See ``docs/DESIGN.md`` ("Time source for the Redis backend") for the
+TTL/clock split and cluster-routing notes.
 """
 
 from __future__ import annotations
@@ -87,29 +54,20 @@ logger = logging.getLogger(__name__)
 
 
 def _wrap_redis_error(op: str, exc: BaseException) -> StoreError:
-    """Wrap a redis-py exception as :class:`StoreError`.
-
-    Logs at DEBUG so operators flipping to debug level get a breadcrumb
-    before the StoreError bubbles up to the middleware. Truncated repr
-    defends against log-volume DoS via attacker-crafted multi-MB exception
-    text.
-    """
+    """Wrap a redis-py exception as :class:`StoreError`."""
+    # Truncated repr defends against log-volume DoS via attacker-crafted
+    # multi-MB exception text.
     logger.debug("redis %s failed: %r", op, exc)
     msg = f"Redis {op} failed: {repr(exc)[:200]}"
     return StoreError(msg)
 
 
-# Atomic acquire as a single Lua call — classifies into one of four
-# AcquireOutcome branches in one round-trip. Returns a 2-element table:
-# the outcome value (matches AcquireOutcome.<m>.value strings) and the
-# record's msgpack bytes (newly inserted or existing, depending on branch).
-#
-# HMGET reads all three fields in one atomic snapshot — closes the
-# eviction-race window where sequential HGETs could see a partially
-# evicted key (state=False, falling through to REPLAY with garbage data).
+# Single HMGET (not sequential HGETs) snapshots fp/state/data in one
+# atomic read so a concurrent HSET can't interleave between fields.
 #
 #   KEYS: [1] full namespaced key
 #   ARGV: [1] fingerprint hex, [2] ttl_ms (positive int), [3] new-record msgpack bytes
+#   Returns: 2-element table {outcome_string, record_msgpack}
 _ACQUIRE_LUA = """
 local key = KEYS[1]
 local fp = ARGV[1]
@@ -143,13 +101,10 @@ return {'replay', existing_data}
 """
 
 
-# Atomic complete: validates the slot still exists (TTL race may have
-# evicted it between Python's read and this script), then writes the new
-# state + data and refreshes TTL to ``completed_ttl``. Returns 'ok' on
-# success, ``redis.error_reply`` if the slot is gone.
-#
 #   KEYS: [1] full namespaced key
 #   ARGV: [1] new-record msgpack bytes, [2] ttl_ms (positive int)
+#   Returns: 'ok', or error_reply if the slot was evicted between
+#   Python's read and this call.
 _COMPLETE_LUA = """
 local key = KEYS[1]
 local data = ARGV[1]
@@ -180,7 +135,6 @@ class RedisStore:
     """
 
     def __init__(self, client: Redis, *, namespace: str = "idem") -> None:
-        # redis-py's get_encoder() is untyped in stubs as of 5.x.
         encoder = client.get_encoder()  # type: ignore[no-untyped-call]
         if encoder.decode_responses:
             msg = (
@@ -190,6 +144,8 @@ class RedisStore:
             raise ValueError(msg)
         self.client = client
         self.namespace = namespace
+        # ``register_script`` caches the SHA1 locally; redis-py re-issues
+        # ``EVAL`` automatically on ``NOSCRIPT`` (replica failover, SCRIPT FLUSH).
         self._acquire_script: Any = client.register_script(_ACQUIRE_LUA)
         self._complete_script: Any = client.register_script(_COMPLETE_LUA)
 
@@ -199,9 +155,8 @@ class RedisStore:
         fingerprint: Fingerprint,
         ttl: float,
     ) -> AcquireResult:
-        # Build the record we'd insert if CREATED. For other branches the
-        # Lua script returns the existing record's bytes and this serialized
-        # blob is discarded — accepted simplicity-tax for a single-script API.
+        # Pre-encode the would-be-CREATED record; non-CREATED branches
+        # discard it. Single-script trade-off.
         now = time.time()
         new_record = IdempotencyRecord(
             key=key,
@@ -247,10 +202,8 @@ class RedisStore:
             return None
 
         record = decode_record(data)
-        # Symmetry with InMemoryStore: filter expired records Python-side.
-        # Defense in depth — Redis PEXPIRE is the primary eviction path,
-        # but a millisecond-scale race between expiry and our read can
-        # surface a record that is already expired by client-side clock.
+        # Defense in depth: catch the sub-millisecond race between
+        # PEXPIRE and HGET via Python clock.
         if record.is_expired(time.time()):
             return None
         return record
@@ -261,15 +214,12 @@ class RedisStore:
         response: CachedResponse,
         ttl: float,
     ) -> None:
-        # NOTE: this is a 2-RTT operation (HGET + Lua). Between the read and
-        # the script call, a TTL eviction + re-acquire could create a fresh
-        # slot at the same key — we'd then complete-overwrite that fresh
-        # slot's data. Matches InMemoryStore behavior (caller-owns-slot
-        # contract; race bounded by in_flight_ttl tuning). Tracked for both
-        # backends in a v0.3.0+ hardening pass.
+        # 2-RTT (HGET + Lua): a TTL eviction + re-acquire between them
+        # would let us complete-overwrite a fresh slot's data. Bounded
+        # by in_flight_ttl tuning; harden in a future pass.
         full_key = self._key(key)
 
-        # Read existing to preserve identity (key, fingerprint, created_at).
+        # Read to preserve identity (key, fingerprint, created_at).
         try:
             existing_data = await self.client.hget(full_key, "data")  # type: ignore[misc]
         except (RedisError, OSError) as exc:
@@ -280,10 +230,8 @@ class RedisStore:
             raise StoreError(msg)
 
         existing = decode_record(existing_data)
-        # Defense in depth, symmetric with ``get``: PEXPIRE may not have
-        # fired yet on a sub-millisecond race, but the Python clock can
-        # already see ``expires_at`` elapsed. Treat that as gone (matches
-        # InMemoryStore's complete-on-expired guard from issue #17 / slice 7).
+        # Same Python-clock guard as ``get``: PEXPIRE may not have
+        # fired yet on a sub-millisecond race.
         now = time.time()
         if existing.is_expired(now):
             msg = f"cannot complete unknown idempotency key: {key!r}"

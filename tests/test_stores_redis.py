@@ -1,10 +1,10 @@
 """Tests for the Redis store module that don't require a live Redis.
 
-The cross-store conformance suite (slice 5) covers the actual store
-behavior against a testcontainers Redis. The tests here pin module-level
-invariants — namespace defaults, the Lua/enum agreement, the
-``decode_responses`` guard, and per-method error-wrapping — so they
-catch regressions without needing container infrastructure.
+The cross-store conformance suite covers actual store behavior against
+a testcontainers Redis. The tests here pin module-level invariants —
+namespace defaults, the Lua/enum agreement, the ``decode_responses``
+guard, and per-method error-wrapping — so they catch regressions
+without needing container infrastructure.
 """
 
 from __future__ import annotations

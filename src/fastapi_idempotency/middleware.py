@@ -27,9 +27,8 @@ class IdempotencyMiddleware:
     """ASGI middleware enforcing ``Idempotency-Key`` semantics.
 
     Only non-safe methods (POST, PATCH, PUT, DELETE) are intercepted; safe
-    requests pass through untouched. Implemented as a raw ASGI class rather
-    than :class:`starlette.middleware.base.BaseHTTPMiddleware` so streaming
-    response pass-through (v0.2.0) remains possible.
+    requests pass through untouched. Built on raw ASGI rather than
+    ``BaseHTTPMiddleware`` so streaming responses can pass through live.
     """
 
     NON_SAFE_METHODS: ClassVar[frozenset[str]] = frozenset(
@@ -119,8 +118,7 @@ class IdempotencyMiddleware:
         if result.outcome is AcquireOutcome.REPLAY:
             cached = result.record.response
             if cached is None:
-                # Store contract says REPLAY → response is set; if we ever
-                # see this, it's a store bug. Treat as 500.
+                # Store-contract violation: REPLAY without a response.
                 await self._send_plain_response(
                     send,
                     status=500,
@@ -233,9 +231,8 @@ class IdempotencyMiddleware:
         return 1 <= len(value) <= self.MAX_KEY_LENGTH and value.isascii()
 
     def _content_length_exceeds_limit(self, scope: Scope) -> bool:
-        # Pre-check: if Content-Length declares a body bigger than the
-        # configured limit, skip idempotency entirely. We can't recover
-        # mid-buffer, so this header is the only fence we trust.
+        # Pre-check: we can't recover mid-buffer, so Content-Length is
+        # the only fence we trust before letting the request through.
         if self.max_body_bytes is None:
             return False
         raw = self._get_header(scope, b"content-length")
@@ -249,12 +246,7 @@ class IdempotencyMiddleware:
 
     @staticmethod
     def _get_header(scope: Scope, name: bytes) -> bytes | None:
-        """Return the first header matching ``name`` (case-insensitive).
-
-        ASGI delivers headers as a list of ``(bytes, bytes)`` tuples
-        with names lowercased by the server, but lower-casing both sides
-        keeps the helper safe regardless of the caller's input.
-        """
+        """Return the first header matching ``name`` (case-insensitive)."""
         target = name.lower()
         headers: list[tuple[bytes, bytes]] = scope.get("headers", [])
         for header_name, header_value in headers:
@@ -358,6 +350,6 @@ class _ResponseInterceptor:
                 await self._send(message)
                 return
 
-            # Cleared so the duplicate-start guard stays load-bearing.
+            # Clear so a second http.response.start re-trips the guard.
             self._pending_start = None
             self.body.extend(message.get("body", b""))

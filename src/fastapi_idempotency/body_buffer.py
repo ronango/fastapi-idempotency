@@ -17,14 +17,12 @@ async def buffer_request_body(
 ) -> tuple[bytes, Receive]:
     """Drain ASGI ``receive()`` and return ``(body, replay_receive)``.
 
-    Middleware must fingerprint the body before the handler consumes it;
-    ``receive()`` is one-shot, so we drain and hand the handler a replay
-    that yields the same body once.
+    The middleware needs the body for fingerprinting; ``receive()`` is
+    one-shot, so we drain and hand the handler a replay.
 
-    Raises :class:`RequestTooLargeError` as soon as the running total
-    exceeds ``max_bytes``; the rest of the stream is left untouched so
-    the caller can decide what to do (typically respond 413 without
-    reading further).
+    Raises :class:`RequestTooLargeError` once the running total exceeds
+    ``max_bytes``; the rest of the stream is left untouched so the
+    caller can respond 413 without reading further.
     """
     chunks: list[bytes] = []
     total = 0

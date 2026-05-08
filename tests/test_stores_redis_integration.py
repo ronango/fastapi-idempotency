@@ -83,11 +83,9 @@ async def test_complete_raises_on_python_side_expired_record(
     """``RedisStore.complete`` raises ``StoreError`` when the existing
     record is expired by Python clock, even if PEXPIRE hasn't fired.
 
-    Symmetric with ``test_get_filters_python_side_expired_record``: the
-    in-flight TTL race that masks an expired slot from server-side
-    eviction is the exact scenario the defense exists to catch — without
-    it, ``complete`` would silently overwrite an "expired but still in
-    Redis" slot, exactly the bug fixed in InMemoryStore in slice 7.
+    Symmetric with ``test_get_filters_python_side_expired_record`` —
+    catches the sub-millisecond race that would otherwise let
+    ``complete`` silently overwrite an expired-but-still-in-Redis slot.
     """
     store = RedisStore(redis_client)
     key = IdempotencyKey("python-side-expired-complete")
