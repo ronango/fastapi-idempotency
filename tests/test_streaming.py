@@ -191,7 +191,7 @@ def _make_streaming_app(chunks: list[bytes]) -> Any:
 
 async def test_streaming_response_flows_through_with_stored_false_header() -> None:
     chunks = [b"first ", b"second ", b"third"]
-    middleware = IdempotencyMiddleware(_make_streaming_app(chunks), InMemoryStore())
+    middleware = IdempotencyMiddleware(_make_streaming_app(chunks), InMemoryStore(), secret=None)
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=middleware),
@@ -227,7 +227,7 @@ async def test_streaming_response_releases_slot_so_retry_runs_handler_again() ->
         await send({"type": "http.response.body", "body": b"b", "more_body": False})
 
     store = InMemoryStore()
-    middleware = IdempotencyMiddleware(streaming_app, store)
+    middleware = IdempotencyMiddleware(streaming_app, store, secret=None)
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=middleware),
@@ -272,7 +272,7 @@ async def test_non_streaming_response_still_caches_and_replays() -> None:
             {"type": "http.response.body", "body": b'{"ok":true}', "more_body": False},
         )
 
-    middleware = IdempotencyMiddleware(single_chunk_app, InMemoryStore())
+    middleware = IdempotencyMiddleware(single_chunk_app, InMemoryStore(), secret=None)
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=middleware),
@@ -322,7 +322,7 @@ async def test_streaming_app_raises_mid_stream_releases_slot() -> None:
         await send({"type": "http.response.body", "body": b"b", "more_body": False})
 
     store = InMemoryStore()
-    middleware = IdempotencyMiddleware(flaky_streaming_app, store)
+    middleware = IdempotencyMiddleware(flaky_streaming_app, store, secret=None)
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=middleware),
@@ -359,7 +359,7 @@ async def test_handler_returns_without_emitting_start_yields_500() -> None:
         await _drive_request_lifecycle(receive)
 
     store = InMemoryStore()
-    middleware = IdempotencyMiddleware(silent_app, store)
+    middleware = IdempotencyMiddleware(silent_app, store, secret=None)
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=middleware),
@@ -385,6 +385,7 @@ async def test_streaming_with_empty_body_first_chunk_still_detected() -> None:
     middleware = IdempotencyMiddleware(
         _make_streaming_app([b"", b"data"]),
         InMemoryStore(),
+        secret=None,
     )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=middleware),
@@ -421,7 +422,7 @@ async def test_starlette_streaming_response_passes_through() -> None:
     app = Starlette(
         routes=[Route("/stream", stream_endpoint, methods=["POST"])],
     )
-    middleware = IdempotencyMiddleware(app, InMemoryStore())
+    middleware = IdempotencyMiddleware(app, InMemoryStore(), secret=None)
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=middleware),
