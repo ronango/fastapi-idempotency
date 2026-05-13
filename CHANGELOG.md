@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Idempotency keys are never written to logs in raw form. Log records
+  carry a truncated 12-hex-char hash and structured `extra` fields
+  (`key_hash`, `fingerprint`, `outcome`, `status`) for incident
+  correlation. See `docs/DESIGN.md` ("Logging — keys hashed, hot path
+  silent") for the per-outcome log levels and the field contract. (#22)
 - Strip volatile response headers (`Set-Cookie`, `Authorization`,
   `WWW-Authenticate`, `Proxy-Authenticate`, `Cookie`) and
   connection-level headers (`Connection`, `Keep-Alive`,
