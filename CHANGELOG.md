@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING** (pre-1.0): `IdempotencyMiddleware(...)` now requires a
+  `secret=` keyword argument. Pass `secret=os.environ['IDEMP_SECRET']
+  .encode()` to enable HMAC-SHA256 request fingerprints (recommended
+  for any shared-store deployment), or `secret=None` to explicitly opt
+  into the v0.1.0 plain-SHA-256 fallback. Omitting the kwarg raises
+  `ValueError` at construction — no silent insecure default. Two
+  deployments sharing a store must use the same secret; different
+  secrets produce different fingerprints (#20).
+
 ### Added
 
 - Streaming response pass-through (#18). FastAPI / Starlette

@@ -25,6 +25,8 @@ pip install \
 ### FastAPI
 
 ```python
+import os
+
 from fastapi import FastAPI
 from pydantic import BaseModel
 
@@ -37,7 +39,11 @@ class Order(BaseModel):
 
 
 app = FastAPI()
-app.add_middleware(IdempotencyMiddleware, store=InMemoryStore())
+app.add_middleware(
+    IdempotencyMiddleware,
+    store=InMemoryStore(),
+    secret=os.environ["IDEMP_SECRET"].encode(),
+)
 
 
 @app.post("/orders")
@@ -45,6 +51,35 @@ async def create_order(order: Order) -> dict[str, int]:
     # Your business logic — runs at most once per Idempotency-Key.
     return {"id": 42, "item_id": order.item_id}
 ```
+
+`secret=` is required — it switches the request fingerprint from plain
+SHA-256 to HMAC-SHA256, so an attacker who knows someone's
+`Idempotency-Key` can't probe via `MISMATCH`/`REPLAY` outcomes to learn
+body shape. Two deployments sharing a store must use the **same**
+secret; different secrets produce different fingerprints.
+
+Generate the secret once and inject it via environment:
+
+```bash
+export IDEMP_SECRET="$(openssl rand -hex 32)"
+```
+
+The middleware fails at construction (`KeyError` from `os.environ[...]`)
+if the variable isn't set — fail-fast at deploy is preferred over a
+runtime surprise.
+
+#### Insecure opt-out (tests / migration only)
+
+`secret=None` explicitly disables HMAC and falls back to v0.1.0's plain
+SHA-256. Acceptable in tests; **not** safe for any shared-store
+deployment.
+
+#### Secret rotation
+
+Rotating the secret invalidates every cached and in-flight record (they
+hash with the old secret, look like `MISMATCH` to requests under the
+new one). To rotate safely, drain `completed_ttl` first, or accept that
+in-flight retries during the rotation window behave as new requests.
 
 Send the same request twice with `Idempotency-Key: abc-123`:
 
@@ -55,6 +90,8 @@ Send the same request twice with `Idempotency-Key: abc-123`:
 ### Starlette
 
 ```python
+import os
+
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -68,7 +105,11 @@ async def create_order(request):
 
 
 app = Starlette(routes=[Route("/orders", create_order, methods=["POST"])])
-app = IdempotencyMiddleware(app, InMemoryStore())
+app = IdempotencyMiddleware(
+    app,
+    InMemoryStore(),
+    secret=os.environ["IDEMP_SECRET"].encode(),
+)
 ```
 
 ### Redis (multi-worker / multi-process)
@@ -87,9 +128,11 @@ pip install \
 ```
 
 ```python
-import redis.asyncio
+import os
 
+import redis.asyncio
 from fastapi import FastAPI
+
 from fastapi_idempotency import IdempotencyMiddleware, RedisStore
 
 # Production-recommended client config — see RedisStore docstring for
@@ -104,7 +147,11 @@ client = redis.asyncio.Redis(
 )
 
 app = FastAPI()
-app.add_middleware(IdempotencyMiddleware, store=RedisStore(client))
+app.add_middleware(
+    IdempotencyMiddleware,
+    store=RedisStore(client),
+    secret=os.environ["IDEMP_SECRET"].encode(),
+)
 ```
 
 Atomicity: `acquire` is a single Lua `EVAL`, so concurrent workers

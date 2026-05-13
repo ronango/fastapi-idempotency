@@ -56,6 +56,8 @@ class InMemoryStore:
                 self._records[key] = record
                 return AcquireResult(outcome=AcquireOutcome.CREATED, record=record)
 
+            # Plain ``!=`` is fine: both fingerprints are server-computed
+            # over attacker-supplied body, so timing leaks no useful bits.
             if existing.fingerprint != fingerprint:
                 return AcquireResult(outcome=AcquireOutcome.MISMATCH, record=existing)
 

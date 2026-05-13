@@ -11,6 +11,7 @@ import contextlib
 from typing import TYPE_CHECKING, Any
 
 import httpx
+import pytest
 
 from fastapi_idempotency import (
     CachedResponse,
@@ -52,11 +53,77 @@ async def echo_app(scope: Scope, receive: Receive, send: Send) -> None:
 
 
 def make_client(app: Any) -> httpx.AsyncClient:
-    middleware = IdempotencyMiddleware(app, InMemoryStore())
+    middleware = IdempotencyMiddleware(app, InMemoryStore(), secret=None)
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=middleware),
         base_url="http://testserver",
     )
+
+
+def test_missing_secret_kwarg_raises_value_error() -> None:
+    """``IdempotencyMiddleware(app, store)`` without ``secret=`` must fail
+    loudly — the middleware never silently picks an insecure fingerprint mode."""
+    with pytest.raises(ValueError, match="secret="):
+        IdempotencyMiddleware(echo_app, InMemoryStore())
+
+
+async def test_hmac_secret_caches_response() -> None:
+    """End-to-end smoke: a non-None ``secret`` produces working idempotency
+    (HMAC fingerprint flows through acquire/complete/replay)."""
+    store = InMemoryStore()
+    middleware = IdempotencyMiddleware(echo_app, store, secret=b"production-secret")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        first = await client.post(
+            "/",
+            headers={"Idempotency-Key": "k"},
+            content=b"hi",
+        )
+        second = await client.post(
+            "/",
+            headers={"Idempotency-Key": "k"},
+            content=b"hi",
+        )
+
+    assert first.status_code == 200
+    assert second.headers["idempotent-replayed"] == "true"
+
+
+async def test_hmac_different_secret_isolates_fingerprint() -> None:
+    """Two middlewares with different secrets but the same store and key:
+    fingerprints don't collide, so reuse-with-altered-body detection (422)
+    works as if the bodies were different."""
+    store = InMemoryStore()
+
+    m1 = IdempotencyMiddleware(echo_app, store, secret=b"secret-A")
+    m2 = IdempotencyMiddleware(echo_app, store, secret=b"secret-B")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=m1),
+        base_url="http://testserver",
+    ) as c1:
+        first = await c1.post(
+            "/",
+            headers={"Idempotency-Key": "k"},
+            content=b"body",
+        )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=m2),
+        base_url="http://testserver",
+    ) as c2:
+        second = await c2.post(
+            "/",
+            headers={"Idempotency-Key": "k"},
+            content=b"body",
+        )
+
+    # Same key + same body bytes, but different secrets → different
+    # fingerprints → middleware #2 sees MISMATCH, not REPLAY.
+    assert first.status_code == 200
+    assert second.status_code == 422
 
 
 async def test_get_passes_through_to_handler() -> None:
@@ -89,7 +156,7 @@ async def test_non_http_scope_passes_through() -> None:
     async def app(scope: Scope, _receive: Receive, _send: Send) -> None:
         seen_scopes.append(scope["type"])
 
-    middleware = IdempotencyMiddleware(app, InMemoryStore())
+    middleware = IdempotencyMiddleware(app, InMemoryStore(), secret=None)
 
     async def _noop_receive() -> Message:
         return {"type": "lifespan.startup"}
@@ -151,7 +218,7 @@ async def test_first_post_runs_handler_and_returns_response() -> None:
 
 async def test_first_post_stores_completed_record() -> None:
     store = InMemoryStore()
-    middleware = IdempotencyMiddleware(echo_app, store)
+    middleware = IdempotencyMiddleware(echo_app, store, secret=None)
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=middleware),
@@ -231,7 +298,7 @@ async def test_5xx_response_releases_slot() -> None:
         await send({"type": "http.response.body", "body": b"oops"})
 
     store = InMemoryStore()
-    middleware = IdempotencyMiddleware(server_error_app, store)
+    middleware = IdempotencyMiddleware(server_error_app, store, secret=None)
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=middleware),
@@ -276,7 +343,7 @@ async def test_5xx_then_retry_runs_handler_again() -> None:
             {"type": "http.response.body", "body": str(invocations).encode()},
         )
 
-    middleware = IdempotencyMiddleware(flaky_app, InMemoryStore())
+    middleware = IdempotencyMiddleware(flaky_app, InMemoryStore(), secret=None)
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=middleware),
@@ -317,7 +384,7 @@ async def test_handler_exception_releases_slot() -> None:
         raise RuntimeError(msg)
 
     store = InMemoryStore()
-    middleware = IdempotencyMiddleware(boom_app, store)
+    middleware = IdempotencyMiddleware(boom_app, store, secret=None)
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=middleware),
@@ -336,7 +403,7 @@ async def test_handler_exception_releases_slot() -> None:
 async def test_oversized_body_passes_through_without_idempotency() -> None:
     """Content-Length over max_body_bytes → handler runs, no slot recorded."""
     store = InMemoryStore()
-    middleware = IdempotencyMiddleware(echo_app, store, max_body_bytes=100)
+    middleware = IdempotencyMiddleware(echo_app, store, max_body_bytes=100, secret=None)
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=middleware),
@@ -381,7 +448,7 @@ async def test_chunked_body_overflow_returns_413() -> None:
         await send({"type": "http.response.body", "body": b"ok"})
 
     store = InMemoryStore()
-    middleware = IdempotencyMiddleware(counting_app, store, max_body_bytes=100)
+    middleware = IdempotencyMiddleware(counting_app, store, max_body_bytes=100, secret=None)
 
     async def chunks() -> AsyncIterator[bytes]:
         # Two 60-byte chunks → 120 bytes total > max_body_bytes=100.
@@ -418,7 +485,7 @@ async def test_single_oversized_chunk_returns_413() -> None:
         await echo_app(scope, receive, send)
 
     store = InMemoryStore()
-    middleware = IdempotencyMiddleware(counting_app, store, max_body_bytes=100)
+    middleware = IdempotencyMiddleware(counting_app, store, max_body_bytes=100, secret=None)
 
     async def chunks() -> AsyncIterator[bytes]:
         yield b"a" * 200
@@ -442,7 +509,7 @@ async def test_chunked_body_at_exact_limit_passes() -> None:
     """Boundary: ``total > max_bytes`` (strict greater-than) — a body of
     exactly ``max_body_bytes`` must succeed."""
     store = InMemoryStore()
-    middleware = IdempotencyMiddleware(echo_app, store, max_body_bytes=100)
+    middleware = IdempotencyMiddleware(echo_app, store, max_body_bytes=100, secret=None)
 
     async def chunks() -> AsyncIterator[bytes]:
         yield b"a" * 100
@@ -464,7 +531,7 @@ async def test_chunked_body_at_exact_limit_passes() -> None:
 async def test_undersized_body_uses_idempotency() -> None:
     """Sanity: when Content-Length is within the limit, the slot is recorded."""
     store = InMemoryStore()
-    middleware = IdempotencyMiddleware(echo_app, store, max_body_bytes=100)
+    middleware = IdempotencyMiddleware(echo_app, store, max_body_bytes=100, secret=None)
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=middleware),
@@ -516,7 +583,7 @@ async def test_store_error_on_complete_adds_idempotency_stored_false_header() ->
         async def release(self, key: IdempotencyKey) -> None:
             await self._inner.release(key)
 
-    middleware = IdempotencyMiddleware(echo_app, FailingCompleteStore())
+    middleware = IdempotencyMiddleware(echo_app, FailingCompleteStore(), secret=None)
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=middleware),
@@ -568,6 +635,7 @@ async def test_in_flight_ttl_expiry_reclaims_orphaned_slot() -> None:
         slow_handler,
         InMemoryStore(),
         in_flight_ttl=0.02,
+        secret=None,
     )
 
     async with httpx.AsyncClient(

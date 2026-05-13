@@ -23,6 +23,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class _Missing:
+    """Sentinel type for the ``secret`` kwarg default.
+
+    Forces callers to choose ``secret=os.environ[...].encode()`` (HMAC)
+    or ``secret=None`` (explicit insecure mode) at construction. Typed
+    as its own class so ``mypy --strict`` narrows correctly inside the
+    ``isinstance`` guard rather than falling back to ``Any``.
+    """
+
+    def __repr__(self) -> str:
+        return "<unset>"
+
+
+_SECRET_NOT_SET = _Missing()
+
+
 class IdempotencyMiddleware:
     """ASGI middleware enforcing ``Idempotency-Key`` semantics.
 
@@ -42,13 +58,22 @@ class IdempotencyMiddleware:
         app: ASGIApp,
         store: Store,
         *,
+        secret: bytes | None | _Missing = _SECRET_NOT_SET,
         header_name: str = "Idempotency-Key",
         in_flight_ttl: float = 30.0,
         completed_ttl: float = 86_400.0,
         max_body_bytes: int | None = None,
     ) -> None:
+        if isinstance(secret, _Missing):
+            msg = (
+                "secret= is required. Pass "
+                "`secret=os.environ['IDEMP_SECRET'].encode()` for HMAC-SHA256 "
+                "fingerprints. See README for the opt-out path used in tests."
+            )
+            raise ValueError(msg)
         self.app = app
         self.store = store
+        self._secret: bytes | None = secret
         self.header_name = header_name
         self.in_flight_ttl = in_flight_ttl
         self.completed_ttl = completed_ttl
@@ -116,6 +141,7 @@ class IdempotencyMiddleware:
             scope["path"],
             scope.get("query_string", b""),
             body,
+            secret=self._secret,
         )
 
         result = await self.store.acquire(
