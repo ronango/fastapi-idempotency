@@ -68,6 +68,25 @@ The middleware fails at construction (`KeyError` from `os.environ[...]`)
 if the variable isn't set — fail-fast at deploy is preferred over a
 runtime surprise.
 
+#### Enforcing the header (`require_key=True`)
+
+By default the middleware is opt-in: requests without an
+`Idempotency-Key` pass through to the handler. Payment APIs and other
+side-effect-heavy services usually want to enforce the header instead:
+
+```python
+app.add_middleware(
+    IdempotencyMiddleware,
+    store=InMemoryStore(),
+    secret=os.environ["IDEMP_SECRET"].encode(),
+    require_key=True,
+)
+```
+
+With `require_key=True`, a non-safe method (POST/PATCH/PUT/DELETE)
+arriving without the header responds `400 Bad Request` instead. Safe
+methods (GET/HEAD/OPTIONS) are unaffected.
+
 #### Insecure opt-out (tests / migration only)
 
 `secret=None` explicitly disables HMAC and falls back to v0.1.0's plain
@@ -175,6 +194,7 @@ the `Idempotency-Key` header. Outcomes:
 | Handler returned 5xx | Slot released; a retry will run the handler again. |
 | Handler returned a streaming response (`StreamingResponse`, SSE, file download) | Forwarded live; not cached. Slot released, retries run the handler again. |
 | Chunked-transfer body exceeds `max_body_bytes` | `413 Content Too Large`; handler not invoked, no slot created. |
+| Non-safe method with no header, when `require_key=True` | `400 Bad Request`; handler not invoked. (Pass-through with `require_key=False`, the default.) |
 | Storage failed after a successful response, or any other path that won't replay on retry | `Idempotency-Stored: false` header on the response |
 
 The `Idempotency-Stored: false` header is a union signal: it appears

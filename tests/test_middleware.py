@@ -153,6 +153,156 @@ async def test_post_without_key_passes_through_to_handler() -> None:
     assert response.content == b"hello"
 
 
+async def test_require_key_default_off_missing_key_passes_through() -> None:
+    """Regression: ``require_key=False`` (default) preserves v0.1.0
+    pass-through behavior when the header is absent."""
+    invocations = 0
+
+    async def counting_app(scope: Scope, receive: Receive, send: Send) -> None:
+        nonlocal invocations
+        invocations += 1
+        await echo_app(scope, receive, send)
+
+    middleware = IdempotencyMiddleware(counting_app, InMemoryStore(), secret=None)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post("/", content=b"hello")
+
+    assert response.status_code == 200
+    assert response.content == b"hello"
+    assert invocations == 1
+
+
+async def test_require_key_true_missing_key_returns_400() -> None:
+    """``require_key=True`` + missing header on a non-safe method → 400."""
+    invocations = 0
+
+    async def counting_app(scope: Scope, receive: Receive, send: Send) -> None:
+        nonlocal invocations
+        invocations += 1
+        await echo_app(scope, receive, send)
+
+    middleware = IdempotencyMiddleware(
+        counting_app,
+        InMemoryStore(),
+        secret=None,
+        require_key=True,
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post("/", content=b"hello")
+
+    assert response.status_code == 400
+    assert response.text == "Idempotency-Key header required for POST requests"
+    assert invocations == 0
+
+
+async def test_require_key_true_present_key_runs_normal_flow() -> None:
+    """``require_key=True`` + header present → normal CREATED → REPLAY."""
+    store = InMemoryStore()
+    middleware = IdempotencyMiddleware(
+        echo_app,
+        store,
+        secret=None,
+        require_key=True,
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        first = await client.post(
+            "/",
+            headers={"Idempotency-Key": "abc"},
+            content=b"hi",
+        )
+        replay = await client.post(
+            "/",
+            headers={"Idempotency-Key": "abc"},
+            content=b"hi",
+        )
+
+    assert first.status_code == 200
+    assert replay.headers.get("idempotent-replayed") == "true"
+
+
+async def test_require_key_true_safe_methods_pass_through() -> None:
+    """GET / HEAD / OPTIONS are never intercepted, regardless of
+    ``require_key``."""
+    middleware = IdempotencyMiddleware(
+        echo_app,
+        InMemoryStore(),
+        secret=None,
+        require_key=True,
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        get_response = await client.get("/")
+        head_response = await client.head("/")
+        options_response = await client.options("/")
+
+    assert get_response.status_code == 200
+    assert head_response.status_code == 200
+    assert options_response.status_code == 200
+
+
+async def test_require_key_true_empty_header_falls_to_invalid_not_missing() -> None:
+    """Empty-string header → ``_is_valid_key`` branch (400 "invalid
+    Idempotency-Key"), not the ``require_key`` branch. Pins the
+    contract: missing != malformed."""
+    middleware = IdempotencyMiddleware(
+        echo_app,
+        InMemoryStore(),
+        secret=None,
+        require_key=True,
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            "/",
+            headers={"Idempotency-Key": ""},
+            content=b"x",
+        )
+
+    assert response.status_code == 400
+    assert response.text == "invalid Idempotency-Key"
+
+
+async def test_require_key_true_400_message_quotes_actual_method() -> None:
+    """The 400 message echoes the request method so the client knows
+    which path needs the header (PATCH/PUT/DELETE not just POST)."""
+    middleware = IdempotencyMiddleware(
+        echo_app,
+        InMemoryStore(),
+        secret=None,
+        require_key=True,
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        patch_response = await client.patch("/", content=b"x")
+        delete_response = await client.delete("/")
+
+    assert patch_response.status_code == 400
+    assert "PATCH" in patch_response.text
+    assert delete_response.status_code == 400
+    assert "DELETE" in delete_response.text
+
+
 async def test_non_http_scope_passes_through() -> None:
     """Lifespan / websocket scopes should reach the wrapped app untouched."""
     seen_scopes: list[str] = []
