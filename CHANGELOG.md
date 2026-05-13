@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Strip volatile response headers (`Set-Cookie`, `Authorization`,
+  `WWW-Authenticate`, `Proxy-Authenticate`, `Cookie`) and
+  connection-level headers (`Connection`, `Keep-Alive`,
+  `Transfer-Encoding`, `Upgrade`, `Trailer`) before caching a
+  response. Previously the cache stored every header from the first
+  response verbatim and re-emitted them on replay — a session-theft
+  primitive in shared-store deployments where two requests share an
+  `Idempotency-Key`. The first caller still receives the handler's
+  original headers untouched; only the stored copy is filtered. Carried
+  over from v0.1.0; documented in `docs/DESIGN.md` ("Volatile response
+  headers stripped before caching"). (#21)
+
 ### Changed
 
 - **BREAKING** (pre-1.0): `IdempotencyMiddleware(...)` now requires a

@@ -208,6 +208,34 @@ them via `_send_response` without per-record streaming logic. Future
 contributors adding a `complete_streaming` path would have to
 preserve this invariant or rework the REPLAY emit.
 
+## Volatile response headers stripped before caching
+
+**Status: v0.2.0.**
+
+Caching response headers verbatim is a security bug: `Set-Cookie`
+carries session tokens, `Authorization` echoes leak credentials, and
+`WWW-Authenticate` challenges encode realm/nonce state tied to the
+first caller. Re-emitting any of these on replay hands them to
+whoever presents the same `Idempotency-Key` — a session-theft
+primitive in shared-store or multi-tenant deployments.
+
+`_run_and_cache` therefore filters a hard-coded denylist before
+constructing `CachedResponse`. The **first** caller still receives
+the handler's original headers untouched; only the stored copy (and
+the REPLAY emission derived from it) is filtered.
+
+Denylist (`_VOLATILE_HEADER_DENYLIST` in `middleware.py`):
+
+- Identity-bearing: `set-cookie`, `authorization`,
+  `proxy-authorization`, `www-authenticate`, `proxy-authenticate`,
+  `cookie`
+- Connection-level (RFC 9110 §7.6.1 forbids caching): `connection`,
+  `keep-alive`, `transfer-encoding`, `upgrade`, `trailer`
+
+Hard-coded for v0.2.0. v0.3.0 may expose a constructor kwarg
+(`volatile_headers=[...]`) so deployments with custom headers
+(e.g. proprietary auth-context echoes) can extend the list.
+
 ## Why msgpack over JSON
 
 _To be written during v0.1.0._

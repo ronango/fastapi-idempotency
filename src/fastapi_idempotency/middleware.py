@@ -39,6 +39,35 @@ class _Missing:
 _SECRET_NOT_SET = _Missing()
 
 
+# Headers dropped from the cached response — prevents session/credential
+# leak on REPLAY. See ``docs/DESIGN.md`` ("Volatile response headers")
+# for the threat model and denylist split.
+_VOLATILE_HEADER_DENYLIST: frozenset[bytes] = frozenset(
+    {
+        b"set-cookie",
+        b"authorization",
+        b"proxy-authorization",
+        b"www-authenticate",
+        b"proxy-authenticate",
+        b"cookie",
+        b"connection",
+        b"keep-alive",
+        b"transfer-encoding",
+        b"upgrade",
+        b"trailer",
+    },
+)
+
+
+def _strip_volatile_headers(
+    headers: tuple[tuple[bytes, bytes], ...],
+) -> tuple[tuple[bytes, bytes], ...]:
+    """Drop denylisted headers (case-insensitive) for caching."""
+    return tuple(
+        (name, value) for name, value in headers if name.lower() not in _VOLATILE_HEADER_DENYLIST
+    )
+
+
 class IdempotencyMiddleware:
     """ASGI middleware enforcing ``Idempotency-Key`` semantics.
 
@@ -238,9 +267,11 @@ class IdempotencyMiddleware:
             )
             return
 
+        # Strip for the cached copy only; the first caller below
+        # receives ``interceptor.headers`` untouched.
         cached = CachedResponse(
             status_code=interceptor.status,
-            headers=interceptor.headers,
+            headers=_strip_volatile_headers(interceptor.headers),
             body=bytes(interceptor.body),
         )
         extra_headers: list[tuple[bytes, bytes]] = []
