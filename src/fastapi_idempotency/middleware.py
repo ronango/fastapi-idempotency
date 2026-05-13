@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 from typing import TYPE_CHECKING, ClassVar
 
@@ -11,6 +13,7 @@ from .fingerprint import compute_fingerprint
 from .types import (
     AcquireOutcome,
     CachedResponse,
+    Fingerprint,
     IdempotencyKey,
 )
 
@@ -66,6 +69,33 @@ def _strip_volatile_headers(
     return tuple(
         (name, value) for name, value in headers if name.lower() not in _VOLATILE_HEADER_DENYLIST
     )
+
+
+_LOG_HASH_HEX_LEN = 12
+
+
+def _hash_for_log(value: bytes, secret: bytes | None) -> str:
+    h = hmac.new(secret, value, hashlib.sha256) if secret is not None else hashlib.sha256(value)
+    return h.hexdigest()[:_LOG_HASH_HEX_LEN]
+
+
+def _log_context(
+    key: IdempotencyKey,
+    secret: bytes | None,
+    *,
+    fingerprint: Fingerprint | None = None,
+    outcome: AcquireOutcome | None = None,
+    status: int | None = None,
+) -> dict[str, str]:
+    """Structured ``extra=`` payload — keeps raw keys out of logs."""
+    ctx: dict[str, str] = {"key_hash": _hash_for_log(key.encode(), secret)}
+    if fingerprint is not None:
+        ctx["fingerprint"] = fingerprint[:_LOG_HASH_HEX_LEN]
+    if outcome is not None:
+        ctx["outcome"] = outcome.value
+    if status is not None:
+        ctx["status"] = str(status)
+    return ctx
 
 
 class IdempotencyMiddleware:
@@ -202,6 +232,16 @@ class IdempotencyMiddleware:
             return
 
         if result.outcome is AcquireOutcome.IN_FLIGHT:
+            logger.info(
+                "concurrent request for in-flight Idempotency-Key; responding 409",
+                extra=_log_context(
+                    key,
+                    self._secret,
+                    fingerprint=fingerprint,
+                    outcome=result.outcome,
+                    status=409,
+                ),
+            )
             await self._send_plain_response(
                 send,
                 status=409,
@@ -209,7 +249,18 @@ class IdempotencyMiddleware:
             )
             return
 
-        # MISMATCH
+        # MISMATCH — same key, different body. May indicate a probe or
+        # a client bug; log at WARNING so ops can correlate.
+        logger.warning(
+            "Idempotency-Key reused with a different body; responding 422",
+            extra=_log_context(
+                key,
+                self._secret,
+                fingerprint=fingerprint,
+                outcome=result.outcome,
+                status=422,
+            ),
+        )
         await self._send_plain_response(
             send,
             status=422,
@@ -226,11 +277,18 @@ class IdempotencyMiddleware:
         interceptor = _ResponseInterceptor(send)
         try:
             await self.app(scope, replay, interceptor)
-        except Exception:
+        except Exception as exc:
+            # Don't log ``exc_info=True`` — a downstream handler may
+            # raise with the raw key in its message; the formatted
+            # traceback would defeat the no-PII-in-logs guarantee.
+            # Operators get the exception class via structured context;
+            # the surrounding ASGI server logs the full trace.
             logger.warning(
-                "exception inside intercepted handler for key=%r; releasing slot",
-                key,
-                exc_info=True,
+                "exception inside intercepted handler; releasing slot",
+                extra={
+                    **_log_context(key, self._secret),
+                    "exc_type": type(exc).__name__,
+                },
             )
             await self.store.release(key)
             raise
@@ -244,8 +302,8 @@ class IdempotencyMiddleware:
             # Handler returned without emitting http.response.start —
             # synthesize a 500 so the wire contract holds.
             logger.warning(
-                "handler returned without sending http.response.start for key=%r; emitting 500",
-                key,
+                "handler returned without sending http.response.start; emitting 500",
+                extra=_log_context(key, self._secret, status=500),
             )
             await self.store.release(key)
             await self._send_plain_response(
@@ -279,9 +337,9 @@ class IdempotencyMiddleware:
             await self.store.complete(key, cached, ttl=self.completed_ttl)
         except StoreError:
             logger.warning(
-                "store.complete raised StoreError for key=%r; serving "
-                "uncached response with Idempotency-Stored: false",
-                key,
+                "store.complete raised StoreError; serving uncached "
+                "response with Idempotency-Stored: false",
+                extra=_log_context(key, self._secret),
             )
             extra_headers = [(b"idempotency-stored", b"false")]
 

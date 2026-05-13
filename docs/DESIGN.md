@@ -236,6 +236,47 @@ Hard-coded for v0.2.0. v0.3.0 may expose a constructor kwarg
 (`volatile_headers=[...]`) so deployments with custom headers
 (e.g. proprietary auth-context echoes) can extend the list.
 
+## Logging — keys hashed, hot path silent
+
+**Status: v0.2.0.**
+
+Applications routinely use user-controlled identifiers (order IDs,
+user emails, session tokens) as idempotency keys. Writing them to
+centralized logs (Datadog, ELK, Splunk) creates PII retention beyond
+the application's own controls. The middleware therefore hashes every
+key before emitting any log record, and includes it as a structured
+`key_hash` field alongside `fingerprint` and `outcome` for incident
+correlation.
+
+- **Hash function** — HMAC-SHA256 when `secret=` is configured for
+  fingerprinting, plain SHA-256 otherwise. Reusing the same secret
+  avoids a second config knob; a log-reader without the secret can't
+  recompute the hash of a guessed key. Rotate `IDEMP_SECRET` on
+  incident — secret compromise enables both fingerprint forgery and
+  log-hash recomputation.
+- **Truncation** — 12 hex chars (48 bits). Collision-resistant for
+  correlation within a typical retention window (birthday at ~2^24
+  keys), not a primary key and not reversible to recover the source.
+- **What gets logged** — `MISMATCH` (WARNING; potential probe or
+  client bug), `IN_FLIGHT` (INFO; normal concurrency), `StoreError`,
+  handler exceptions, and the no-response 500 path. `CREATED` /
+  `REPLAY` are silent — they're the hot path and would drown other
+  signals. Validation paths (400, 413, passthrough) are the access
+  log's responsibility.
+- **Structured fields** land on `LogRecord` via `extra=`, so
+  structlog / python-json-logger consumers get them as JSON keys:
+  - `key_hash` — always present.
+  - `fingerprint` — 12-hex truncation of the body fingerprint
+    (present on `MISMATCH` and `IN_FLIGHT`).
+  - `outcome` — the `AcquireOutcome` value (`mismatch`, `in_flight`).
+  - `status` — HTTP status code as string (`"409"`, `"422"`, `"500"`).
+  - `exc_type` — exception class name (handler-exception path only).
+- **No `exc_info=True`** on the handler-exception path — a downstream
+  handler may raise with the raw key in its message, and the
+  formatter would render the traceback unredacted. The exception
+  type lands in `exc_type` for triage; the surrounding ASGI server
+  is the right home for full traces.
+
 ## Why msgpack over JSON
 
 _To be written during v0.1.0._
