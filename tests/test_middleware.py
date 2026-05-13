@@ -22,6 +22,10 @@ from fastapi_idempotency import (
     InMemoryStore,
     StoreError,
 )
+from fastapi_idempotency.middleware import (
+    _VOLATILE_HEADER_DENYLIST,
+    _strip_volatile_headers,
+)
 from fastapi_idempotency.types import AcquireResult, IdempotencyRecord
 
 if TYPE_CHECKING:
@@ -255,6 +259,139 @@ async def test_replay_returns_cached_response_with_replayed_header() -> None:
     assert second.status_code == 200
     assert second.content == b"hello"
     assert second.headers["idempotent-replayed"] == "true"
+
+
+async def test_replay_strips_volatile_headers_but_keeps_safe_ones() -> None:
+    """Set-Cookie, Authorization etc. on the first response must NOT be
+    re-emitted on replay — otherwise whoever presents the same key gets
+    the first caller's session. Safe headers (Content-Type, custom X-*)
+    stay. The first caller still sees the originals."""
+
+    async def app_with_volatile_headers(
+        _scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                break
+            if not message.get("more_body", False):
+                break
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"set-cookie", b"session=A; HttpOnly"),
+                    (b"authorization", b"Bearer leaked"),
+                    (b"www-authenticate", b"Basic realm=x"),
+                    (b"x-trace-id", b"req-1"),
+                ],
+            },
+        )
+        await send({"type": "http.response.body", "body": b'{"ok":true}'})
+
+    async with make_client(app_with_volatile_headers) as client:
+        first = await client.post(
+            "/",
+            headers={"Idempotency-Key": "abc"},
+            content=b"hi",
+        )
+        replay = await client.post(
+            "/",
+            headers={"Idempotency-Key": "abc"},
+            content=b"hi",
+        )
+
+    # First response carries everything — handler's caller sees its own
+    # cookie etc.
+    assert first.headers.get("set-cookie") == "session=A; HttpOnly"
+    assert first.headers.get("authorization") == "Bearer leaked"
+
+    # Replay drops identity-bearing headers.
+    assert replay.headers.get("idempotent-replayed") == "true"
+    assert "set-cookie" not in replay.headers
+    assert "authorization" not in replay.headers
+    assert "www-authenticate" not in replay.headers
+    # Safe headers preserved.
+    assert replay.headers.get("content-type") == "application/json"
+    assert replay.headers.get("x-trace-id") == "req-1"
+
+
+async def test_volatile_header_denylist_is_case_insensitive() -> None:
+    """ASGI lowercases header names per spec, but handlers may set them
+    in any case via a non-conforming app. Verify ``Set-Cookie`` (mixed
+    case) is still stripped."""
+    stripped = _strip_volatile_headers(
+        (
+            (b"Set-Cookie", b"a=1"),
+            (b"SET-COOKIE", b"b=2"),
+            (b"Content-Type", b"text/plain"),
+        ),
+    )
+
+    assert (b"Content-Type", b"text/plain") in stripped
+    assert all(name.lower() != b"set-cookie" for name, _ in stripped)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        b"set-cookie",
+        b"authorization",
+        b"proxy-authorization",
+        b"www-authenticate",
+        b"proxy-authenticate",
+        b"cookie",
+        b"connection",
+        b"keep-alive",
+        b"transfer-encoding",
+        b"upgrade",
+        b"trailer",
+    ],
+)
+def test_each_denylisted_header_is_stripped(name: bytes) -> None:
+    """Pin every entry in the denylist — a typo in any single header
+    name (e.g., ``www-authenitcate``) slips past integration coverage."""
+    stripped = _strip_volatile_headers(((name, b"value"),))
+
+    assert stripped == ()
+
+
+def test_denylist_entries_are_all_lowercase() -> None:
+    """Lookup compares against ``name.lower()``; a capitalized entry in
+    the frozenset (e.g., ``b"Set-Cookie"``) would silently never match
+    and become dead code."""
+    for entry in _VOLATILE_HEADER_DENYLIST:
+        assert entry == entry.lower()
+
+
+def test_strip_volatile_headers_preserves_safe_headers() -> None:
+    """Connection-level entries drop; common safe headers
+    (Content-Type, Content-Length, custom X-*, security headers)
+    survive — guards against an overzealous denylist regression."""
+    stripped = _strip_volatile_headers(
+        (
+            (b"connection", b"keep-alive"),
+            (b"keep-alive", b"timeout=5"),
+            (b"transfer-encoding", b"chunked"),
+            (b"upgrade", b"h2c"),
+            (b"trailer", b"x-tail"),
+            (b"content-type", b"application/json"),
+            (b"content-length", b"42"),
+            (b"strict-transport-security", b"max-age=31536000"),
+            (b"x-trace-id", b"abc"),
+        ),
+    )
+
+    assert stripped == (
+        (b"content-type", b"application/json"),
+        (b"content-length", b"42"),
+        (b"strict-transport-security", b"max-age=31536000"),
+        (b"x-trace-id", b"abc"),
+    )
 
 
 async def test_same_key_different_body_returns_422() -> None:

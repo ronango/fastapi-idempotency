@@ -170,7 +170,7 @@ the `Idempotency-Key` header. Outcomes:
 | --- | --- |
 | First request with a given key | Handler runs; response is returned and cached. |
 | Same key + same body, while the first is still in flight | `409 Conflict` |
-| Same key + same body, after the first completed | Cached response with `Idempotent-Replayed: true` header |
+| Same key + same body, after the first completed | Cached response with `Idempotent-Replayed: true` header; volatile headers (`Set-Cookie`, `Authorization`, etc.) stripped — see DESIGN.md |
 | Same key + different body | `422 Unprocessable Entity` |
 | Handler returned 5xx | Slot released; a retry will run the handler again. |
 | Handler returned a streaming response (`StreamingResponse`, SSE, file download) | Forwarded live; not cached. Slot released, retries run the handler again. |
