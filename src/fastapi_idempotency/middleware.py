@@ -122,6 +122,7 @@ class IdempotencyMiddleware:
         in_flight_ttl: float = 30.0,
         completed_ttl: float = 86_400.0,
         max_body_bytes: int | None = None,
+        require_key: bool = False,
     ) -> None:
         if isinstance(secret, _Missing):
             msg = (
@@ -137,6 +138,7 @@ class IdempotencyMiddleware:
         self.in_flight_ttl = in_flight_ttl
         self.completed_ttl = completed_ttl
         self.max_body_bytes = max_body_bytes
+        self.require_key = require_key
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -149,6 +151,14 @@ class IdempotencyMiddleware:
 
         key_value = self._extract_key(scope)
         if key_value is None:
+            if self.require_key:
+                method = scope["method"]
+                await self._send_plain_response(
+                    send,
+                    status=400,
+                    message=f"Idempotency-Key header required for {method} requests",
+                )
+                return
             await self.app(scope, receive, send)
             return
 

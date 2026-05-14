@@ -39,6 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `require_key=True` opt-in mode on `IdempotencyMiddleware`. With it
+  enabled, non-safe methods (POST/PATCH/PUT/DELETE) that arrive
+  without an `Idempotency-Key` header get `400 Bad Request` instead of
+  passing through. Default stays `False` (v0.1.0 pass-through);
+  payment APIs and other side-effect-heavy services should opt in.
+  Safe methods (GET/HEAD/OPTIONS) are unaffected. (#23)
 - Streaming response pass-through (#18). FastAPI / Starlette
   `StreamingResponse` (and any ASGI app emitting `more_body=True` on
   the first body chunk) now flows through the middleware live instead
