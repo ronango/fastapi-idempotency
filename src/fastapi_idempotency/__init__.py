@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     # Static-checker re-export — runtime import is lazy via __getattr__.
     from .stores.redis import RedisStore as RedisStore
 
-__version__ = "0.2.0a1"
+__version__ = "0.2.0rc1"
 
 __all__ = [
     "ConflictError",
