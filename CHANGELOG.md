@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0rc1] - 2026-05-14
+
+Release candidate — no functional changes from `0.2.0a1`. Validates the
+`pre-release → rc → final` publish pipeline against TestPyPI before
+cutting `0.2.0`.
+
 ## [0.2.0a1] - 2026-05-14
 
 ### Added
