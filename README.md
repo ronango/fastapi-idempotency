@@ -6,7 +6,7 @@
 
 ## Status
 
-**Pre-release / experimental.** The public API is not stable; expect breaking changes before v0.2.0. Do not use in production yet.
+**Pre-release / experimental.** The public API is not stable and may break before v1.0. Not for production use yet. See Roadmap below for the v0.2.0 pre-release pipeline.
 
 ## Quickstart
 
@@ -91,7 +91,10 @@ methods (GET/HEAD/OPTIONS) are unaffected.
 
 `secret=None` explicitly disables HMAC and falls back to v0.1.0's plain
 SHA-256. Acceptable in tests; **not** safe for any shared-store
-deployment.
+deployment. Side effect: the log `key_hash` is then plain SHA-256, so
+a log reader with a candidate-key list (e.g. user IDs, order numbers)
+can recompute hashes and re-identify entries. Set a secret to get
+HMAC-based, unlinkable log hashes.
 
 #### Secret rotation
 
@@ -211,7 +214,7 @@ in-buffer fence is the only defense when the header is absent.
 
 ## Roadmap
 
-- **v0.1.0** — minimal working version: in-memory store, middleware core, fingerprint, two-phase TTL, replay path, basic error handling. Publish to TestPyPI.
-- **v0.2.0** — production-ready: Redis backend, `409 Conflict` on concurrent requests, `422` on body mismatch, streaming pass-through, full CI matrix (3.10–3.13), PyPI release via Trusted Publisher.
-- **v0.3.0** — ergonomics: lifecycle hooks (`on_replay`, `on_conflict`, `on_mismatch`), per-route config, per-user scoping, benchmarks.
-- **v0.4.0** — polish: full docs site, cookbook (payments, webhooks), release-notes automation.
+- **v0.1.0** — minimal working version: in-memory store, middleware core, fingerprint, two-phase TTL, replay path, basic error handling. Published to TestPyPI.
+- **v0.2.0** (in pre-release pipeline) — Redis backend, HMAC fingerprint (`secret=` required), streaming pass-through, volatile-header stripping, `require_key`, 413 on chunked overflow, key-hashing in logs, full CI matrix (3.10–3.13). Cutting `0.2.0a1 → 0.2.0rc1 → 0.2.0` to TestPyPI; not yet on real PyPI.
+- **v0.3.0** — production hardening: configurable volatile-header denylist, lifecycle hooks (`on_replay`, `on_conflict`, `on_mismatch`), per-route config, key scoping, metrics, SECURITY.md, PyPI release via Trusted Publisher.
+- **v0.4.0** — polish: docs site, cookbook (payments, webhooks), release-notes automation.
