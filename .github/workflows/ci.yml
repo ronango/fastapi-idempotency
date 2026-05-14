@@ -39,7 +39,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install uv
-        uses: astral-sh/setup-uv@v8
+        # v8+ ships as immutable tags only — pin to the specific
+        # version, no floating major (matches the action's own
+        # security guidance from the v8.0.0 release notes).
+        uses: astral-sh/setup-uv@v8.1.0
         with:
           enable-cache: true
       - name: Set up Python ${{ matrix.python-version }}
