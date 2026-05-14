@@ -42,17 +42,19 @@ class _Missing:
 _SECRET_NOT_SET = _Missing()
 
 
-# Headers dropped from the cached response — prevents session/credential
-# leak on REPLAY. See ``docs/DESIGN.md`` ("Volatile response headers")
-# for the threat model and denylist split.
+# Stripped from the cached response — see ``docs/DESIGN.md``
+# ("Volatile response headers stripped before caching") for the
+# threat model and the identity / connection-level split.
 _VOLATILE_HEADER_DENYLIST: frozenset[bytes] = frozenset(
     {
+        # Identity / credential headers
         b"set-cookie",
         b"authorization",
         b"proxy-authorization",
         b"www-authenticate",
         b"proxy-authenticate",
         b"cookie",
+        # Hop-by-hop (RFC 7230 §6.1, RFC 9110 §7.6.1)
         b"connection",
         b"keep-alive",
         b"transfer-encoding",
@@ -65,7 +67,6 @@ _VOLATILE_HEADER_DENYLIST: frozenset[bytes] = frozenset(
 def _strip_volatile_headers(
     headers: tuple[tuple[bytes, bytes], ...],
 ) -> tuple[tuple[bytes, bytes], ...]:
-    """Drop denylisted headers (case-insensitive) for caching."""
     return tuple(
         (name, value) for name, value in headers if name.lower() not in _VOLATILE_HEADER_DENYLIST
     )
@@ -259,8 +260,9 @@ class IdempotencyMiddleware:
             )
             return
 
-        # MISMATCH — same key, different body. May indicate a probe or
-        # a client bug; log at WARNING so ops can correlate.
+        # MISMATCH — log at WARNING: a key reused with a different body
+        # is either a buggy client or a probe. See DESIGN.md
+        # ("Logging — keys hashed, hot path silent").
         logger.warning(
             "Idempotency-Key reused with a different body; responding 422",
             extra=_log_context(
@@ -288,11 +290,9 @@ class IdempotencyMiddleware:
         try:
             await self.app(scope, replay, interceptor)
         except Exception as exc:
-            # Don't log ``exc_info=True`` — a downstream handler may
-            # raise with the raw key in its message; the formatted
-            # traceback would defeat the no-PII-in-logs guarantee.
-            # Operators get the exception class via structured context;
-            # the surrounding ASGI server logs the full trace.
+            # No ``exc_info=True``: downstream exceptions may carry the
+            # raw key in their message, and the traceback would render
+            # it unredacted. See DESIGN.md ("Logging — keys hashed").
             logger.warning(
                 "exception inside intercepted handler; releasing slot",
                 extra={

@@ -2,11 +2,36 @@
 
 This document records the reasoning behind non-obvious choices in `fastapi-idempotency`. Each section covers one decision: the context, the options considered, the choice, and the trade-offs accepted.
 
-> Status: placeholder. Sections are filled in as each version lands; the tag under each heading marks when it becomes authoritative.
+> Each section is tagged with the version in which it became authoritative. Sections tagged "planned for vN" describe decisions ratified but not yet implemented.
 
 ## Which response statuses are cacheable
 
-_To be written during v0.2.0._
+**Status: v0.2.0.**
+
+- **2xx, 3xx, 4xx** are cached — they reflect a deterministic handler
+  outcome that a retry would reach again. The replay path emits the
+  same body and headers (minus the volatile-header denylist).
+  - **3xx redirect caveat**: a `Location` header carrying a presigned
+    URL, OAuth `state` parameter, or other single-use token will be
+    re-emitted byte-for-byte on every replay within `completed_ttl`.
+    The right shape is to return a stable redirect target and let the
+    token-mint sit behind it; if a single-use redirect really is the
+    response, the client should omit `Idempotency-Key` on that route,
+    or the route should be excluded from the middleware (per-route
+    config lands in v0.3.0). Adding `Location` to the volatile
+    denylist would silently break the common case of stable
+    redirects, so the trade-off lands on the handler.
+- **5xx is *not* cached.** A 5xx is treated as a transient failure:
+  the slot is released and a retry runs the handler fresh. Caching
+  it would freeze the failure into every retry for `completed_ttl`,
+  which is precisely the wrong behaviour. The threshold lives in
+  `IdempotencyMiddleware.FIRST_SERVER_ERROR_STATUS` (= 500).
+- **Streaming responses are not cached** (see "Streaming response
+  pass-through" below). They're forwarded live with
+  `Idempotency-Stored: false` so a client knows the slot won't replay.
+- **Synthesized middleware responses (400, 409, 413, 422)** are not
+  cached because they are produced by the middleware itself, not by
+  the wrapped handler — there is nothing to replay.
 
 ## Two-phase TTL for the `in_flight` state
 
@@ -163,7 +188,7 @@ The middleware can't cache a streaming response — by definition the
 body is produced incrementally, often larger than memory can buffer
 (SSE feeds, file downloads, long-poll). Buffering would either OOM
 the worker or delay the first byte until the stream finishes,
-defeating the point of streaming. Issue #18 chose to **forward live
+defeating the point of streaming. v0.2.0 chose to **forward live
 and skip caching**: the slot is released, the response carries
 `Idempotency-Stored: false`, and retries run the handler again.
 
@@ -250,10 +275,16 @@ correlation.
 
 - **Hash function** — HMAC-SHA256 when `secret=` is configured for
   fingerprinting, plain SHA-256 otherwise. Reusing the same secret
-  avoids a second config knob; a log-reader without the secret can't
-  recompute the hash of a guessed key. Rotate `IDEMP_SECRET` on
-  incident — secret compromise enables both fingerprint forgery and
-  log-hash recomputation.
+  avoids a second config knob.
+  - Under HMAC, a log reader without the secret cannot recompute the
+    hash of a guessed key — this is the security property.
+  - Under plain SHA-256 (`secret=None`), the log hash is **not**
+    unlinkable: a log reader with a list of candidate keys (e.g. user
+    IDs, order numbers) can recompute their hashes and re-identify
+    log entries. `secret=None` is the v0.1.0 fallback for tests and
+    migration; production deployments should always set a secret.
+  - Rotate `IDEMP_SECRET` on incident — secret compromise enables
+    both fingerprint forgery and log-hash recomputation.
 - **Truncation** — 12 hex chars (48 bits). Collision-resistant for
   correlation within a typical retention window (birthday at ~2^24
   keys), not a primary key and not reversible to recover the source.
@@ -279,8 +310,39 @@ correlation.
 
 ## Why msgpack over JSON
 
-_To be written during v0.1.0._
+**Status: v0.2.0.**
+
+`IdempotencyRecord.response.body` is `bytes` and `headers` is
+`tuple[tuple[bytes, bytes], ...]`. JSON has no native bytes type — a
+JSON-based codec must base64-encode every body and every header value
+(~33% size overhead plus encode/decode CPU on every read/write). On a
+1 MiB body that's 350 KiB of avoidable storage and ~3 ms of CPU per
+round-trip; on a Redis-backed deployment with a 24 h `completed_ttl`,
+that compounds across millions of cached records.
+
+msgpack handles bytes natively (the `bin` type), preserves tuples vs
+lists (relevant for the headers shape), and round-trips deterministically
+when fed the same input. The codec is wrapped in a v1 envelope
+(`{"v": 1, "data": ...}`) so a future schema change can ship a v2
+decoder without breaking already-stored v1 records.
+
+Pickle was ruled out at design time: it's a remote-code-execution
+sink on untrusted bytes, which is exactly what a compromised Redis
+becomes. msgpack with `strict_map_key=True` + bounded `max_bin_len`
+/ `max_str_len` / `max_array_len` / `max_map_len` is the inverse —
+attacker-controlled bytes can't allocate beyond the configured caps,
+and an extra explicit `isinstance` validation pass on the decoded
+dict catches type-confusion attempts (e.g. `key` arriving as `int`,
+`body` as `str`, header pairs as 3-tuples that would unpack
+silently).
 
 ## Key scoping (`scope_factory`)
 
-_To be written during v0.3.0._
+**Status: planned for v0.3.0.** Not yet implemented.
+
+The current key-extraction reads `Idempotency-Key` from the request
+headers. Multi-tenant deployments often want to scope the key by
+something else — tenant ID, authenticated user, route prefix — so
+two tenants sharing the wire-level header don't collide. `scope_factory`
+will be a callable `(scope) -> bytes` injected into the middleware that
+prefixes the raw header value before the store sees it.
