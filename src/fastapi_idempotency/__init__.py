@@ -15,8 +15,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .errors import (
-    ConflictError,
-    FingerprintMismatchError,
     IdempotencyError,
     RequestTooLargeError,
     StoreError,
@@ -41,8 +39,6 @@ if TYPE_CHECKING:
 __version__ = "0.2.0rc1"
 
 __all__ = [
-    "ConflictError",
-    "FingerprintMismatchError",
     "IdempotencyError",
     "IdempotencyMiddleware",
     "InMemoryStore",
