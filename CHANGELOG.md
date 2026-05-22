@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-23
+
+Final 0.2.0 cut from rc1 after a security/architecture review pass.
+Three deltas vs `0.2.0rc1`; no other behavioral changes.
+
+### Fixed
+
+- `RedisStore.complete` now atomically re-checks the fingerprint inside
+  its Lua `EVAL`, closing a TOCTOU between Python's `HGET` and the
+  `EVAL` itself: an eviction + re-acquire by a different request
+  between those two RTTs now raises `StoreError` instead of silently
+  overwriting the fresh slot. The wider long-handler race (eviction +
+  re-acquire that happened *before* the `HGET`) is not closed; treat
+  `in_flight_ttl` as a correctness boundary (see README "Configuration
+  caveats"). The protocol-level fix lands in v0.3.0.
+
+### Removed
+
+- **BREAKING** (pre-1.0): `ConflictError` and `FingerprintMismatchError`
+  exports. Declared in v0.1.0 but never raised — the middleware signals
+  these conditions via `AcquireOutcome.IN_FLIGHT` / `MISMATCH` on the
+  `Store.acquire` return value and emits `409` / `422` directly.
+  Defensive `except IdempotencyError` (base) still catches everything
+  this library raises.
+
+### Documentation
+
+- README: new "Threat model" and "Configuration caveats" sections —
+  single-tenant scope, HMAC-required threat surfaces, store-access
+  attacker model, `in_flight_ttl` correctness boundary, `max_body_bytes`
+  DoS surface, `completed_ttl` replay window.
+
 ## [0.2.0rc1] - 2026-05-14
 
 Release candidate — no functional changes from `0.2.0a1`. Validates the

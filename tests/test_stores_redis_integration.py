@@ -13,9 +13,11 @@ Marked ``@pytest.mark.redis``. Two purposes:
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 import pytest
 import redis.asyncio
+from redis.exceptions import ResponseError
 
 from fastapi_idempotency import (
     CachedResponse,
@@ -112,3 +114,112 @@ async def test_complete_raises_on_python_side_expired_record(
     response = CachedResponse(status_code=200, headers=(), body=b"")
     with pytest.raises(StoreError):
         await store.complete(key, response, ttl=3600.0)
+
+
+@pytest.mark.redis
+async def test_complete_lua_rejects_fp_mismatch(
+    redis_client: redis.asyncio.Redis,
+) -> None:
+    """The ``_COMPLETE_LUA`` script must refuse to overwrite a slot whose
+    stored fp differs from the expected fp the caller observed — the
+    eviction + re-acquire race that Python's HGET-then-EVAL window opens.
+
+    Drives the Lua directly with a stale ``expected_fp`` to simulate
+    worker A's view of the slot before worker B's re-acquire swapped it.
+    """
+    store = RedisStore(redis_client)
+    key = IdempotencyKey("fp-mismatch-reject")
+    full_key = store._key(key)
+
+    fresh = IdempotencyRecord(
+        key=key,
+        fingerprint=Fingerprint("fp_b"),
+        state=IdempotencyState.IN_FLIGHT,
+        created_at=time.time(),
+        expires_at=time.time() + 30.0,
+        response=None,
+    )
+    await redis_client.hset(
+        full_key,
+        mapping={
+            b"fp": b"fp_b",
+            b"state": b"in_flight",
+            b"data": encode_record(fresh),
+        },
+    )
+    await redis_client.pexpire(full_key, 60_000)
+
+    stale_data = encode_record(replace(fresh, fingerprint=Fingerprint("fp_a")))
+
+    with pytest.raises(ResponseError, match="reclaimed"):
+        await store._complete_script(
+            keys=[full_key],
+            args=["fp_a", 3600 * 1000, stale_data],
+        )
+
+    # Sanity: the fresh slot was not overwritten.
+    assert await redis_client.hget(full_key, "fp") == b"fp_b"
+    assert await redis_client.hget(full_key, "state") == b"in_flight"
+
+
+@pytest.mark.redis
+async def test_complete_full_path_rejects_eviction_and_reacquire(
+    redis_client: redis.asyncio.Redis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end through ``RedisStore.complete``: an eviction + re-acquire
+    that lands between the Python-side HGET and the Lua EVAL raises
+    ``StoreError`` instead of silently overwriting the fresh slot.
+
+    Guards the Python glue (correct fp passed as ``expected_fp``) on top of
+    the Lua-only ``test_complete_lua_rejects_fp_mismatch``. A regression
+    that swaps arg order or passes the wrong fingerprint at the call site
+    would still pass the Lua test, but must fail this one.
+    """
+    store = RedisStore(redis_client)
+    key = IdempotencyKey("eviction-reacquire-e2e")
+    full_key = store._key(key)
+
+    original = IdempotencyRecord(
+        key=key,
+        fingerprint=Fingerprint("fp_a"),
+        state=IdempotencyState.IN_FLIGHT,
+        created_at=time.time(),
+        expires_at=time.time() + 30.0,
+        response=None,
+    )
+    await redis_client.hset(
+        full_key,
+        mapping={
+            b"fp": b"fp_a",
+            b"state": b"in_flight",
+            b"data": encode_record(original),
+        },
+    )
+    await redis_client.pexpire(full_key, 60_000)
+
+    real_hget = store.client.hget
+    swap_done = False
+
+    async def hget_then_swap(name: str, field: str) -> bytes | None:
+        nonlocal swap_done
+        result: bytes | None = await real_hget(name, field)
+        if not swap_done:
+            swap_done = True
+            reacquired = replace(original, fingerprint=Fingerprint("fp_b"))
+            await redis_client.hset(
+                full_key,
+                mapping={b"fp": b"fp_b", b"data": encode_record(reacquired)},
+            )
+        return result
+
+    monkeypatch.setattr(store.client, "hget", hget_then_swap)
+
+    response = CachedResponse(status_code=200, headers=(), body=b"")
+    with pytest.raises(StoreError):
+        await store.complete(key, response, ttl=3600.0)
+
+    monkeypatch.undo()
+    # fp_b's IN_FLIGHT slot survived intact — no silent overwrite.
+    assert await redis_client.hget(full_key, "fp") == b"fp_b"
+    assert await redis_client.hget(full_key, "state") == b"in_flight"

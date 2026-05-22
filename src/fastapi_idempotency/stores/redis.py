@@ -101,21 +101,30 @@ return {'replay', existing_data}
 """
 
 
+# Atomic fp re-check closes the TOCTOU between Python's HGET and
+# this EVAL: an eviction + re-acquire by a different request between
+# the two RTTs yields error_reply rather than a silent overwrite.
+#
 #   KEYS: [1] full namespaced key
-#   ARGV: [1] new-record msgpack bytes, [2] ttl_ms (positive int)
-#   Returns: 'ok', or error_reply if the slot was evicted between
-#   Python's read and this call.
+#   ARGV: [1] expected fingerprint hex, [2] ttl_ms (positive int),
+#         [3] new-record msgpack bytes
+#   Returns: 'ok', or error_reply if the slot is missing / fp mismatches.
 _COMPLETE_LUA = """
 local key = KEYS[1]
-local data = ARGV[1]
+local expected_fp = ARGV[1]
 local ttl_ms = tonumber(ARGV[2])
+local data = ARGV[3]
 
 if not ttl_ms or ttl_ms <= 0 then
   return redis.error_reply('ttl_ms must be a positive integer')
 end
 
-if redis.call('EXISTS', key) == 0 then
+local stored_fp = redis.call('HGET', key, 'fp')
+if not stored_fp then
   return redis.error_reply('cannot complete unknown idempotency key')
+end
+if stored_fp ~= expected_fp then
+  return redis.error_reply('idempotency slot reclaimed by different request')
 end
 
 redis.call('HSET', key, 'state', 'completed', 'data', data)
@@ -174,7 +183,7 @@ class RedisStore:
         try:
             result = await self._acquire_script(
                 keys=[full_key],
-                args=[str(fingerprint), ttl_ms, new_data],
+                args=[fingerprint, ttl_ms, new_data],
             )
         except (RedisError, OSError) as exc:
             raise _wrap_redis_error("acquire", exc) from exc
@@ -214,12 +223,8 @@ class RedisStore:
         response: CachedResponse,
         ttl: float,
     ) -> None:
-        # 2-RTT (HGET + Lua): a TTL eviction + re-acquire between them
-        # would let us complete-overwrite a fresh slot's data. Bounded
-        # by in_flight_ttl tuning; harden in a future pass.
         full_key = self._key(key)
 
-        # Read to preserve identity (key, fingerprint, created_at).
         try:
             existing_data = await self.client.hget(full_key, "data")  # type: ignore[misc]
         except (RedisError, OSError) as exc:
@@ -230,8 +235,8 @@ class RedisStore:
             raise StoreError(msg)
 
         existing = decode_record(existing_data)
-        # Same Python-clock guard as ``get``: PEXPIRE may not have
-        # fired yet on a sub-millisecond race.
+        # Python-clock guard against the sub-ms PEXPIRE-vs-HGET race;
+        # the Lua below covers the eviction + re-acquire race separately.
         now = time.time()
         if existing.is_expired(now):
             msg = f"cannot complete unknown idempotency key: {key!r}"
@@ -249,7 +254,7 @@ class RedisStore:
         try:
             await self._complete_script(
                 keys=[full_key],
-                args=[new_data, ttl_ms],
+                args=[existing.fingerprint, ttl_ms, new_data],
             )
         except (RedisError, OSError) as exc:
             raise _wrap_redis_error("complete", exc) from exc

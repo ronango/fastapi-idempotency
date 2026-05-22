@@ -212,9 +212,62 @@ pass through untouched (idempotency simply skipped). Chunked-transfer
 uploads (no `Content-Length`) over the limit get `413` instead — the
 in-buffer fence is the only defense when the header is absent.
 
+## Threat model
+
+The middleware deduplicates concurrent and retried requests on non-safe
+methods. It is **not** a substitute for authentication or authorization.
+Assumptions:
+
+- **No per-tenant key scoping.** Fingerprints cover
+  `(method, path, query, body)` only. Two users sending the same key
+  with the same request see the same cached response — the first
+  tenant's response leaks to the second. Multiplex tenants upstream
+  (per-tenant store, namespaced keys, custom `Store`).
+- **HMAC secret required for shared stores.** With `secret=None` the
+  fingerprint is plain SHA-256, so an attacker who controls a client
+  can probe via wire outcomes (`409` in-flight, `422` mismatch,
+  `Idempotent-Replayed: true` on match) to confirm which `(key, body)`
+  pairs the store holds. Setting `secret=` to a non-empty bytes value
+  closes the offline-forgery path; all workers sharing a store must
+  use the same secret. Bungled rotation (workers running with mixed
+  secrets simultaneously) silently bypasses dedupe — see the "Secret
+  rotation" note in the Quickstart.
+- **Store access implies response replay or injection.** A reader of
+  the store can replay any cached response by re-issuing the original
+  `(key, body)`. A writer can plant arbitrary responses via `HSET key
+  data <crafted msgpack>` (the middleware will serve them on `REPLAY`)
+  or force re-execution by deleting slots. Use Redis ACLs and
+  per-deployment namespaces.
+
+Deeper rationale and per-decision threat analysis in
+[`docs/DESIGN.md`](docs/DESIGN.md).
+
+## Configuration caveats
+
+Defaults that aren't safe in every deployment:
+
+- **`in_flight_ttl` must exceed handler p99.** If the in-flight slot
+  evicts while the handler is still running and a retry re-acquires
+  the slot with a different body, the long-running handler's
+  `complete()` may write into the wrong slot — either silently
+  overwriting the new record (`InMemoryStore`, or `RedisStore` when
+  the re-acquire happened before this worker's `HGET`) or surfacing
+  as `Idempotency-Stored: false` (`RedisStore` Lua fp-check fires).
+  Either way, treat `in_flight_ttl` as a correctness boundary, not a
+  tuning knob. The protocol-level fix (passing the original
+  fingerprint through `Store.complete`) lands in v0.3.0.
+- **`max_body_bytes=None` is a DoS surface.** Unbounded body
+  buffering lets an attacker hold a worker by sending a slow multi-GB
+  body. Set an explicit per-deployment limit for production. The
+  default tightens in v0.3.0.
+- **`completed_ttl` is both the dedupe window and the replay window.**
+  Default 24h. A leaked `Idempotency-Key` is replayable for as long
+  as `completed_ttl`; shorter windows lose dedupe coverage, longer
+  windows widen the replay-of-captured-request surface.
+
 ## Roadmap
 
 - **v0.1.0** — minimal working version: in-memory store, middleware core, fingerprint, two-phase TTL, replay path, basic error handling. Published to TestPyPI.
-- **v0.2.0** (in pre-release pipeline) — Redis backend, HMAC fingerprint (`secret=` required), streaming pass-through, volatile-header stripping, `require_key`, 413 on chunked overflow, key-hashing in logs, full CI matrix (3.10–3.13). Cutting `0.2.0a1 → 0.2.0rc1 → 0.2.0` to TestPyPI; not yet on real PyPI.
+- **v0.2.0** — Redis backend, HMAC fingerprint (`secret=` required), streaming pass-through, volatile-header stripping, `require_key`, 413 on chunked overflow, key-hashing in logs, full CI matrix (3.10–3.13). Cut as `0.2.0a1 → 0.2.0rc1 → 0.2.0`; the final tag absorbed a TOCTOU fix, a breaking dead-code removal, and the threat-model README sections directly (no intermediate rc2). Published to TestPyPI; not yet on real PyPI.
 - **v0.3.0** — production hardening: configurable volatile-header denylist, lifecycle hooks (`on_replay`, `on_conflict`, `on_mismatch`), per-route config, key scoping, metrics, SECURITY.md, PyPI release via Trusted Publisher.
 - **v0.4.0** — polish: docs site, cookbook (payments, webhooks), release-notes automation.
