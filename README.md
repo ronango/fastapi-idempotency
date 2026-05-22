@@ -268,6 +268,6 @@ Defaults that aren't safe in every deployment:
 ## Roadmap
 
 - **v0.1.0** — minimal working version: in-memory store, middleware core, fingerprint, two-phase TTL, replay path, basic error handling. Published to TestPyPI.
-- **v0.2.0** (in pre-release pipeline) — Redis backend, HMAC fingerprint (`secret=` required), streaming pass-through, volatile-header stripping, `require_key`, 413 on chunked overflow, key-hashing in logs, full CI matrix (3.10–3.13). Cutting `0.2.0a1 → 0.2.0rc1 → 0.2.0` to TestPyPI; not yet on real PyPI.
+- **v0.2.0** — Redis backend, HMAC fingerprint (`secret=` required), streaming pass-through, volatile-header stripping, `require_key`, 413 on chunked overflow, key-hashing in logs, full CI matrix (3.10–3.13). Cut as `0.2.0a1 → 0.2.0rc1 → 0.2.0`; the final tag absorbed a TOCTOU fix, a breaking dead-code removal, and the threat-model README sections directly (no intermediate rc2). Published to TestPyPI; not yet on real PyPI.
 - **v0.3.0** — production hardening: configurable volatile-header denylist, lifecycle hooks (`on_replay`, `on_conflict`, `on_mismatch`), per-route config, key scoping, metrics, SECURITY.md, PyPI release via Trusted Publisher.
 - **v0.4.0** — polish: docs site, cookbook (payments, webhooks), release-notes automation.
