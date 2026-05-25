@@ -246,16 +246,17 @@ Deeper rationale and per-decision threat analysis in
 
 Defaults that aren't safe in every deployment:
 
-- **`in_flight_ttl` must exceed handler p99.** If the in-flight slot
-  evicts while the handler is still running and a retry re-acquires
-  the slot with a different body, the long-running handler's
-  `complete()` may write into the wrong slot — either silently
-  overwriting the new record (`InMemoryStore`, or `RedisStore` when
-  the re-acquire happened before this worker's `HGET`) or surfacing
-  as `Idempotency-Stored: false` (`RedisStore` Lua fp-check fires).
-  Either way, treat `in_flight_ttl` as a correctness boundary, not a
-  tuning knob. The protocol-level fix (passing the original
-  fingerprint through `Store.complete`) lands in v0.3.0.
+- **`in_flight_ttl` is a tuning signal, not a silent correctness
+  boundary.** If the in-flight slot evicts before the handler
+  finishes and a retry re-acquires the slot with a *different* body,
+  the original handler's `complete()` now raises `StoreError`
+  instead of overwriting the new tenant's record — the response is
+  delivered with `Idempotency-Stored: false`. Closed in v0.3.0 via
+  the `Store.complete(record, ...)` protocol; see `docs/DESIGN.md`
+  ("Long-handler race closure") for the closure mechanism and
+  accepted residuals. Set `in_flight_ttl` above handler p99 to keep
+  the race out of production traffic in the first place — but the
+  cross-tenant silent-overwrite risk is gone.
 - **`max_body_bytes=None` is a DoS surface.** Unbounded body
   buffering lets an attacker hold a worker by sending a slow multi-GB
   body. Set an explicit per-deployment limit for production. The
@@ -269,5 +270,5 @@ Defaults that aren't safe in every deployment:
 
 - **v0.1.0** — minimal working version: in-memory store, middleware core, fingerprint, two-phase TTL, replay path, basic error handling. Published to TestPyPI.
 - **v0.2.0** — Redis backend, HMAC fingerprint (`secret=` required), streaming pass-through, volatile-header stripping, `require_key`, 413 on chunked overflow, key-hashing in logs, full CI matrix (3.10–3.13). Cut as `0.2.0a1 → 0.2.0rc1 → 0.2.0`; the final tag absorbed a TOCTOU fix, a breaking dead-code removal, and the threat-model README sections directly (no intermediate rc2). Published to TestPyPI; not yet on real PyPI.
-- **v0.3.0** — production hardening: configurable volatile-header denylist, lifecycle hooks (`on_replay`, `on_conflict`, `on_mismatch`), per-route config, key scoping, metrics, SECURITY.md, PyPI release via Trusted Publisher.
+- **v0.3.0** — production hardening: long-handler race closure via `Store.complete(record, ...)` protocol, configurable volatile-header denylist, lifecycle hooks (`on_replay`, `on_conflict`, `on_mismatch`), per-route config, key scoping, metrics, SECURITY.md, PyPI release via Trusted Publisher.
 - **v0.4.0** — polish: docs site, cookbook (payments, webhooks), release-notes automation.

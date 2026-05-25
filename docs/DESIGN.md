@@ -180,6 +180,76 @@ layer, not the source of truth for "is this expired".
   (`{namespace}:{key}`), so it is safe under Redis Cluster routing —
   no cross-slot operations.
 
+## Long-handler race closure
+
+**Status: v0.3.0.**
+
+`Store.complete` takes the in-flight `IdempotencyRecord` that
+`acquire` returned, not just the key. Stores fp-check the caller's
+`record.fingerprint` against what's currently stored inside their
+atomic section and raise `StoreError` on mismatch.
+
+The race this closes: handler A acquires the slot for `(key, fp_a)`
+and outlives `in_flight_ttl`. The slot evicts. Handler B re-acquires
+the same `key` with a different body (`fp_b`). Handler A finally
+finishes and calls `complete`. With the v0.2.0 protocol — which
+took only `(key, response, ttl)` — the slow handler's response
+would silently overwrite B's slot. A real cross-tenant integrity
+leak when keys collide across requests.
+
+v0.2.0's `RedisStore.complete` had partial coverage via a Lua-side
+`fp` re-check, but only inside the sub-RTT window between Python's
+`HGET` and the `EVAL`. The wider Python-side window before the
+`HGET` was still open. `InMemoryStore` had no protection at all —
+the in-lock check below is brand new.
+
+### What changed in each backend
+
+- `InMemoryStore.complete` compares `existing.fingerprint` against
+  the caller's `record.fingerprint` inside `asyncio.Lock`. The lock
+  makes the check TOCTOU-safe.
+- `RedisStore.complete` is now a single Lua `EVAL` that reads the
+  stored `fp` field, fp-checks against the caller's `expected_fp`,
+  and rewrites `state`/`data` atomically. The 2-RTT v0.2.0 pattern
+  (Python-side `HGET` then Lua `EVAL`) is gone — there is no
+  Python-side window to race against anymore.
+
+### Trade-off: dropping the Python-clock guard on complete
+
+The v0.2.0 `RedisStore.complete` ran a Python-clock `is_expired`
+check on the `HGET` result as defense-in-depth against the
+sub-millisecond race between `PEXPIRE` firing and the next `HGET`
+seeing the key. With the `HGET` gone, that check is gone too.
+Server-side `PEXPIRE` is now the only authority on whether the
+slot is alive for `complete`. The cost: a slot whose Python-clock
+`expires_at` has elapsed but whose `PEXPIRE` hasn't yet fired
+could in principle accept a `complete` and self-heal its
+`expires_at` to a future value. Since the fp must still match for
+the write to land, no cross-tenant leak survives — only a
+slightly-extended slot lifetime for the original handler's own
+record.
+
+### What is not closed
+
+Same-fp ABA — eviction + re-acquire with an identical body — is
+still possible. Both completions carry the same fp and write valid
+responses; the second wins on `data` (last-write-wins). Accepted as
+benign: both completions are retries of semantically the same
+request, so either response is correct. `created_at` is not a
+reliable audit field under this race — the two backends differ in
+which acquire-time it preserves — but no caller depends on it for
+correctness.
+
+### Protocol break
+
+The `Store.complete` signature change is **BREAKING** for
+third-party backends. Migration is mechanical: take a `record`
+parameter where you previously took `key`, and use `record.key` /
+`record.fingerprint` / `record.created_at` (and any other in-flight
+fields you need). The middleware threads `acquire`'s result
+through automatically — built-in stores required no caller-side
+changes beyond the protocol update itself.
+
 ## Streaming response pass-through
 
 **Status: v0.2.0.**
