@@ -202,6 +202,27 @@ async def test_complete_wraps_redis_error_with_op_name() -> None:
         await store.complete(_in_flight_record(), RESPONSE, ttl=3600.0)
 
 
+async def test_complete_is_single_round_trip() -> None:
+    """``complete`` must be one redis call — the Lua EVAL with caller's fp.
+
+    The v0.2.0 implementation issued an extra HGET to read the stored
+    fingerprint before the EVAL (2 RTTs, with a TOCTOU window). v0.3.0
+    drops the HGET — the caller's record already carries the fingerprint
+    so the Lua can fp-check directly. Regression-guards a future refactor
+    that re-adds a Python-side probe and silently doubles latency.
+    """
+    complete_script = AsyncMock(return_value=b"ok")
+    client = _stub_client(
+        register_script_returns=(AsyncMock(), complete_script),
+    )
+    store = RedisStore(client)
+
+    await store.complete(_in_flight_record(), RESPONSE, ttl=3600.0)
+
+    assert complete_script.await_count == 1
+    assert client.hget.await_count == 0
+
+
 async def test_release_wraps_redis_error_with_op_name() -> None:
     client = _stub_client(delete_raises=RedisError("boom"))
     store = RedisStore(client)

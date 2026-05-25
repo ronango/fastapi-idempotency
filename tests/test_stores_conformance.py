@@ -385,6 +385,32 @@ async def test_complete_after_ttl_expires_raises(store: Store) -> None:
         await store.complete(acquired.record, RESPONSE, ttl=3600.0)
 
 
+@pytest.mark.slow
+async def test_complete_rejects_fp_mismatch_after_ttl_reacquire(store: Store) -> None:
+    """Full long-handler race via real TTL eviction.
+
+    Distinct from ``test_complete_rejects_fingerprint_mismatch`` (which
+    uses explicit ``release``) — this one drives the production scenario
+    end-to-end: A's slot evicts by TTL, B re-acquires with a different
+    fingerprint, A's late ``complete`` must raise rather than overwrite
+    B's slot. Catches a backend that handled ``release``-then-reacquire
+    correctly but mishandled TTL-eviction-then-reacquire — Redis's
+    PEXPIRE eviction is a different path from InMemory's lazy ``is_expired``
+    check, and both must converge on the same fp-mismatch verdict.
+    """
+    acquired = await store.acquire(KEY, FP, ttl=_TTL_S)
+    await asyncio.sleep(_TTL_WAIT_S)
+    await store.acquire(KEY, Fingerprint("fp-other"), ttl=30.0)
+
+    with pytest.raises(StoreError):
+        await store.complete(acquired.record, RESPONSE, ttl=3600.0)
+
+    surviving = await store.get(KEY)
+    assert surviving is not None
+    assert surviving.fingerprint == Fingerprint("fp-other")
+    assert surviving.state is IdempotencyState.IN_FLIGHT
+
+
 # ---------------------------------------------------------------------------
 # CachedResponse roundtrip — defends the encode/decode contract end-to-end
 # ---------------------------------------------------------------------------
