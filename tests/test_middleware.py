@@ -859,11 +859,11 @@ async def test_store_error_on_complete_adds_idempotency_stored_false_header() ->
 
         async def complete(
             self,
-            key: IdempotencyKey,
+            record: IdempotencyRecord,
             response: CachedResponse,
             ttl: float,
         ) -> None:
-            del key, response, ttl
+            del record, response, ttl
             msg = "simulated eviction"
             raise StoreError(msg)
 

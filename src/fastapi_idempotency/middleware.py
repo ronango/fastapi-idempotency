@@ -15,6 +15,7 @@ from .types import (
     CachedResponse,
     Fingerprint,
     IdempotencyKey,
+    IdempotencyRecord,
 )
 
 if TYPE_CHECKING:
@@ -221,7 +222,7 @@ class IdempotencyMiddleware:
         )
 
         if result.outcome is AcquireOutcome.CREATED:
-            await self._run_and_cache(scope, replay, send, key)
+            await self._run_and_cache(scope, replay, send, result.record)
             return
 
         if result.outcome is AcquireOutcome.REPLAY:
@@ -284,8 +285,9 @@ class IdempotencyMiddleware:
         scope: Scope,
         replay: Receive,
         send: Send,
-        key: IdempotencyKey,
+        record: IdempotencyRecord,
     ) -> None:
+        key = record.key
         interceptor = _ResponseInterceptor(send)
         try:
             await self.app(scope, replay, interceptor)
@@ -344,7 +346,7 @@ class IdempotencyMiddleware:
         )
         extra_headers: list[tuple[bytes, bytes]] = []
         try:
-            await self.store.complete(key, cached, ttl=self.completed_ttl)
+            await self.store.complete(record, cached, ttl=self.completed_ttl)
         except StoreError:
             logger.warning(
                 "store.complete raised StoreError; serving uncached "

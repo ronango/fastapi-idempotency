@@ -251,7 +251,7 @@ async def test_store_error_logs_warning_with_hashed_key(
         async def get(self, key):  # type: ignore[no-untyped-def]
             return await self._inner.get(key)
 
-        async def complete(self, key, response, ttl):  # type: ignore[no-untyped-def]
+        async def complete(self, record, response, ttl):  # type: ignore[no-untyped-def]
             msg = "store down"
             raise StoreError(msg)
 

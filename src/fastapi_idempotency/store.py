@@ -70,24 +70,27 @@ class Store(Protocol):
 
     async def complete(
         self,
-        key: IdempotencyKey,
+        record: IdempotencyRecord,
         response: CachedResponse,
         ttl: float,
     ) -> None:
         """Transition IN_FLIGHT → COMPLETED, persisting ``response`` for ``ttl`` seconds.
 
-        Preserves ``key``, ``fingerprint``, and ``created_at`` from the
-        in-flight record; overwrites ``state``, ``expires_at``, and
+        ``record`` is the in-flight record the caller received from
+        ``acquire`` (its ``CREATED`` result). The store uses
+        ``record.key`` / ``record.fingerprint`` / ``record.created_at``
+        verbatim and overwrites ``state``, ``expires_at``, and
         ``response``. The new ``expires_at`` is ``now + ttl`` (this
         ``ttl`` *replaces* any remaining acquire-phase TTL — eviction
         is reseated, not extended).
 
-        The caller must own the slot (i.e. previously received
-        ``CREATED`` from ``acquire``). If no record exists for ``key``
-        — or the existing record has expired — the store raises
-        :class:`StoreError`. This typically means the in-flight TTL
-        elapsed before the handler finished; tune ``in_flight_ttl``
-        upward if this fires in production.
+        If no record exists for ``record.key``, the stored record has
+        expired, or its fingerprint differs from ``record.fingerprint``,
+        the store raises :class:`StoreError`. The fingerprint check
+        closes the long-handler race: a handler that outruns
+        ``in_flight_ttl`` would otherwise silently overwrite a slot
+        re-acquired by a different request in the meantime. Tune
+        ``in_flight_ttl`` upward if this fires in production.
         """
         ...
 

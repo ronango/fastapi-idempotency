@@ -26,7 +26,6 @@ from fastapi_idempotency import (
     StoreError,
 )
 from fastapi_idempotency.stores import redis as redis_module
-from fastapi_idempotency.stores._serde import encode_record
 from fastapi_idempotency.stores.redis import (
     _ACQUIRE_LUA,
     RedisStore,
@@ -157,17 +156,19 @@ FP = Fingerprint("f")
 RESPONSE = CachedResponse(status_code=200, headers=(), body=b"")
 
 
-def _existing_record_bytes() -> bytes:
-    """An IN_FLIGHT record with future ``expires_at`` for complete-path setup."""
-    return encode_record(
-        IdempotencyRecord(
-            key=KEY,
-            fingerprint=FP,
-            state=IdempotencyState.IN_FLIGHT,
-            created_at=time.time(),
-            expires_at=time.time() + 30.0,
-            response=None,
-        ),
+def _in_flight_record() -> IdempotencyRecord:
+    """The in-flight record a caller would pass to ``complete``.
+
+    Same shape as the ``acquire`` result for ``KEY`` / ``FP``.
+    """
+    now = time.time()
+    return IdempotencyRecord(
+        key=KEY,
+        fingerprint=FP,
+        state=IdempotencyState.IN_FLIGHT,
+        created_at=now,
+        expires_at=now + 30.0,
+        response=None,
     )
 
 
@@ -188,26 +189,17 @@ async def test_get_wraps_redis_error_with_op_name() -> None:
         await store.get(KEY)
 
 
-async def test_complete_wraps_hget_redis_error_with_op_name() -> None:
-    client = _stub_client(hget_raises=RedisError("boom"))
-    store = RedisStore(client)
-
-    with pytest.raises(StoreError, match="Redis complete failed"):
-        await store.complete(KEY, RESPONSE, ttl=3600.0)
-
-
-async def test_complete_wraps_script_redis_error_with_op_name() -> None:
-    """The complete path has TWO redis-py call sites (HGET then EVAL).
-    Each must wrap independently — covers the second except path."""
+async def test_complete_wraps_redis_error_with_op_name() -> None:
+    """``complete`` is a single Lua EVAL — its only Redis call site must
+    wrap exceptions as ``StoreError`` with the op name."""
     complete_script = AsyncMock(side_effect=RedisError("boom"))
     client = _stub_client(
         register_script_returns=(AsyncMock(), complete_script),
-        hget_returns=_existing_record_bytes(),
     )
     store = RedisStore(client)
 
     with pytest.raises(StoreError, match="Redis complete failed"):
-        await store.complete(KEY, RESPONSE, ttl=3600.0)
+        await store.complete(_in_flight_record(), RESPONSE, ttl=3600.0)
 
 
 async def test_release_wraps_redis_error_with_op_name() -> None:
