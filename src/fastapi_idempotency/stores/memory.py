@@ -74,22 +74,28 @@ class InMemoryStore:
 
     async def complete(
         self,
-        key: IdempotencyKey,
+        record: IdempotencyRecord,
         response: CachedResponse,
         ttl: float,
     ) -> None:
         async with self._lock:
             now = time.time()
-            existing = self._records.get(key)
+            existing = self._records.get(record.key)
             # Expired-but-not-yet-purged records count as gone (matches
-            # Redis PEXPIRE eviction). Must run inside ``self._lock`` —
-            # outside, a TOCTOU race could silent-overwrite a fresh slot.
+            # Redis PEXPIRE eviction).
             if existing is None or existing.is_expired(now):
                 raise StoreError(
-                    f"cannot complete unknown idempotency key: {key!r}",
+                    f"cannot complete unknown idempotency key: {record.key!r}",
                 )
-            self._records[key] = replace(
-                existing,
+            if existing.fingerprint != record.fingerprint:
+                raise StoreError(
+                    f"idempotency slot reclaimed by different request: {record.key!r}",
+                )
+            # Write the caller's record, not ``existing`` — keeps both
+            # backends symmetric under same-fp ABA. See DESIGN.md
+            # ("Long-handler race closure").
+            self._records[record.key] = replace(
+                record,
                 state=IdempotencyState.COMPLETED,
                 expires_at=now + ttl,
                 response=response,

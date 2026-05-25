@@ -101,9 +101,9 @@ return {'replay', existing_data}
 """
 
 
-# Atomic fp re-check closes the TOCTOU between Python's HGET and
-# this EVAL: an eviction + re-acquire by a different request between
-# the two RTTs yields error_reply rather than a silent overwrite.
+# Single-RTT complete. fp-check + HSET + PEXPIRE in one EVAL —
+# see DESIGN.md ("Long-handler race closure") for why the caller's
+# fp is the guard.
 #
 #   KEYS: [1] full namespaced key
 #   ARGV: [1] expected fingerprint hex, [2] ttl_ms (positive int),
@@ -219,42 +219,26 @@ class RedisStore:
 
     async def complete(
         self,
-        key: IdempotencyKey,
+        record: IdempotencyRecord,
         response: CachedResponse,
         ttl: float,
     ) -> None:
-        full_key = self._key(key)
-
-        try:
-            existing_data = await self.client.hget(full_key, "data")  # type: ignore[misc]
-        except (RedisError, OSError) as exc:
-            raise _wrap_redis_error("complete", exc) from exc
-
-        if existing_data is None:
-            msg = f"cannot complete unknown idempotency key: {key!r}"
-            raise StoreError(msg)
-
-        existing = decode_record(existing_data)
-        # Python-clock guard against the sub-ms PEXPIRE-vs-HGET race;
-        # the Lua below covers the eviction + re-acquire race separately.
+        full_key = self._key(record.key)
         now = time.time()
-        if existing.is_expired(now):
-            msg = f"cannot complete unknown idempotency key: {key!r}"
-            raise StoreError(msg)
 
         new_record = replace(
-            existing,
+            record,
             state=IdempotencyState.COMPLETED,
             expires_at=now + ttl,
             response=response,
         )
         new_data = encode_record(new_record)
-
         ttl_ms = int(ttl * 1000)
+
         try:
             await self._complete_script(
                 keys=[full_key],
-                args=[existing.fingerprint, ttl_ms, new_data],
+                args=[record.fingerprint, ttl_ms, new_data],
             )
         except (RedisError, OSError) as exc:
             raise _wrap_redis_error("complete", exc) from exc

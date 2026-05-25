@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING** (pre-1.0): `Store.complete` signature is now
+  `complete(record, response, ttl)` where `record` is the in-flight
+  `IdempotencyRecord` returned by `acquire`. Third-party `Store`
+  implementations must update from the v0.2.0 shape
+  `complete(key, response, ttl)`. The middleware threads
+  `acquire`'s result through automatically; only custom integrations
+  are affected.
+
+### Fixed
+
+- Long-handler race on `Store.complete`: a handler outliving
+  `in_flight_ttl` no longer silently overwrites a slot re-acquired
+  by a different request. Both stores fp-check the caller's record
+  against the stored slot inside their atomic section and raise
+  `StoreError` on mismatch. (The `Store.release` arm of the same
+  race is still open; see `docs/DESIGN.md` "Long-handler race
+  closure" for scope and residuals.)
+- `RedisStore.complete` is now a single round-trip (Lua `EVAL`
+  only); the v0.2.0 Python-side `HGET` probe is gone.
+
 ## [0.2.0] - 2026-05-23
 
 Final 0.2.0 cut from rc1 after a security/architecture review pass.

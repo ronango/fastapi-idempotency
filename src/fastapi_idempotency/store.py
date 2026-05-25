@@ -70,24 +70,28 @@ class Store(Protocol):
 
     async def complete(
         self,
-        key: IdempotencyKey,
+        record: IdempotencyRecord,
         response: CachedResponse,
         ttl: float,
     ) -> None:
         """Transition IN_FLIGHT → COMPLETED, persisting ``response`` for ``ttl`` seconds.
 
-        Preserves ``key``, ``fingerprint``, and ``created_at`` from the
-        in-flight record; overwrites ``state``, ``expires_at``, and
-        ``response``. The new ``expires_at`` is ``now + ttl`` (this
-        ``ttl`` *replaces* any remaining acquire-phase TTL — eviction
-        is reseated, not extended).
+        ``record`` must be the in-flight record the caller received
+        from ``acquire`` (the ``CREATED`` result) — treat it as an
+        opaque token, do not synthesize one. The store writes the
+        caller's record with ``state``, ``expires_at``, and
+        ``response`` overridden. The new ``expires_at`` is
+        ``now + ttl`` (this ``ttl`` *replaces* any remaining
+        acquire-phase TTL — eviction is reseated, not extended).
 
-        The caller must own the slot (i.e. previously received
-        ``CREATED`` from ``acquire``). If no record exists for ``key``
-        — or the existing record has expired — the store raises
-        :class:`StoreError`. This typically means the in-flight TTL
-        elapsed before the handler finished; tune ``in_flight_ttl``
-        upward if this fires in production.
+        Raises :class:`StoreError` if the slot is gone or its stored
+        fingerprint differs from ``record.fingerprint``. Both checks
+        must complete inside the same atomic section before any
+        write. Backends authoritatively define "slot is gone"
+        (server-side `PEXPIRE` for Redis, Python-clock
+        ``is_expired`` for in-memory). See ``docs/DESIGN.md``
+        ("Long-handler race closure") for rationale and conformance
+        requirements.
         """
         ...
 

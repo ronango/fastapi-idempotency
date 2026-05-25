@@ -29,6 +29,7 @@ from fastapi_idempotency import (
     CachedResponse,
     Fingerprint,
     IdempotencyKey,
+    IdempotencyRecord,
     IdempotencyState,
     InMemoryStore,
     Store,
@@ -51,6 +52,32 @@ RESPONSE = CachedResponse(
     body=b'{"id": 42, "status": "ok"}',
     media_type="application/json",
 )
+
+
+def _record(
+    *,
+    key: IdempotencyKey = KEY,
+    fingerprint: Fingerprint = FP,
+    ttl: float = 30.0,
+) -> IdempotencyRecord:
+    """Synthesize an IN_FLIGHT record for error-path tests only.
+
+    The ``Store.complete`` contract says ``record`` is an opaque
+    token from ``acquire``. This helper deliberately bypasses that
+    contract to exercise error paths where no slot exists; do not
+    use it in tests that drive happy-path semantics. Keyword-only
+    because ``key`` and ``fingerprint`` are both str-flavoured
+    NewTypes — positional order errors don't type-check.
+    """
+    now = time.time()
+    return IdempotencyRecord(
+        key=key,
+        fingerprint=fingerprint,
+        state=IdempotencyState.IN_FLIGHT,
+        created_at=now,
+        expires_at=now + ttl,
+        response=None,
+    )
 
 
 @pytest.fixture(
@@ -131,8 +158,8 @@ async def test_acquire_mismatch_after_complete(store: Store) -> None:
     would replay a cached response across users with different
     fingerprints — a real cross-tenant leak. Cheap to test, important.
     """
-    await store.acquire(KEY, FP, ttl=30.0)
-    await store.complete(KEY, RESPONSE, ttl=3600.0)
+    acquired = await store.acquire(KEY, FP, ttl=30.0)
+    await store.complete(acquired.record, RESPONSE, ttl=3600.0)
 
     result = await store.acquire(KEY, Fingerprint("fp-xyz"), ttl=30.0)
 
@@ -140,8 +167,8 @@ async def test_acquire_mismatch_after_complete(store: Store) -> None:
 
 
 async def test_acquire_after_complete_returns_replay(store: Store) -> None:
-    await store.acquire(KEY, FP, ttl=30.0)
-    await store.complete(KEY, RESPONSE, ttl=3600.0)
+    acquired = await store.acquire(KEY, FP, ttl=30.0)
+    await store.complete(acquired.record, RESPONSE, ttl=3600.0)
 
     result = await store.acquire(KEY, FP, ttl=30.0)
 
@@ -173,9 +200,9 @@ async def test_get_returns_record_for_known_key(store: Store) -> None:
 
 
 async def test_complete_transitions_state_with_response(store: Store) -> None:
-    await store.acquire(KEY, FP, ttl=30.0)
+    acquired = await store.acquire(KEY, FP, ttl=30.0)
 
-    await store.complete(KEY, RESPONSE, ttl=3600.0)
+    await store.complete(acquired.record, RESPONSE, ttl=3600.0)
 
     record = await store.get(KEY)
     assert record is not None
@@ -188,7 +215,7 @@ async def test_complete_preserves_identity(store: Store) -> None:
     acquired = await store.acquire(KEY, FP, ttl=30.0)
     original = acquired.record
 
-    await store.complete(KEY, RESPONSE, ttl=3600.0)
+    await store.complete(original, RESPONSE, ttl=3600.0)
 
     record = await store.get(KEY)
     assert record is not None
@@ -199,7 +226,50 @@ async def test_complete_preserves_identity(store: Store) -> None:
 
 async def test_complete_raises_on_unknown_key(store: Store) -> None:
     with pytest.raises(StoreError):
-        await store.complete(KEY, RESPONSE, ttl=3600.0)
+        await store.complete(_record(), RESPONSE, ttl=3600.0)
+
+
+async def test_complete_rejects_fingerprint_mismatch(store: Store) -> None:
+    """Both backends must reject when the stored fp differs from the
+    caller's record. Without this guard a late ``complete`` would
+    overwrite a slot already re-acquired by another request.
+    """
+    original = (await store.acquire(KEY, FP, ttl=30.0)).record
+    await store.release(KEY)
+    await store.acquire(KEY, Fingerprint("fp-other"), ttl=30.0)
+
+    with pytest.raises(StoreError):
+        await store.complete(original, RESPONSE, ttl=3600.0)
+
+    surviving = await store.get(KEY)
+    assert surviving is not None
+    assert surviving.fingerprint == Fingerprint("fp-other")
+    assert surviving.state is IdempotencyState.IN_FLIGHT
+
+
+async def test_complete_preserves_callers_created_at_under_same_fp_aba(
+    store: Store,
+) -> None:
+    """Same-fp ABA: both backends persist the *caller's* ``created_at``.
+
+    Pinned cross-backend so the accepted residual stays observable and
+    consistent — without this, InMemory and Redis could silently diverge
+    on which acquire-time survives.
+    """
+    original = (await store.acquire(KEY, FP, ttl=30.0)).record
+    await store.release(KEY)
+    # Force a measurable gap so the second acquire's ``created_at``
+    # differs from the first — otherwise sub-microsecond ticks could
+    # mask a backend that silently picks the wrong timestamp.
+    await asyncio.sleep(0.01)
+    reacquired = (await store.acquire(KEY, FP, ttl=30.0)).record
+    assert reacquired.created_at > original.created_at
+
+    await store.complete(original, RESPONSE, ttl=3600.0)
+
+    stored = await store.get(KEY)
+    assert stored is not None
+    assert stored.created_at == original.created_at
 
 
 # ---------------------------------------------------------------------------
@@ -234,11 +304,11 @@ async def test_double_release_is_noop(store: Store) -> None:
 
 async def test_complete_after_release_raises(store: Store) -> None:
     """release wipes the slot; subsequent complete has no record to update."""
-    await store.acquire(KEY, FP, ttl=30.0)
+    acquired = await store.acquire(KEY, FP, ttl=30.0)
     await store.release(KEY)
 
     with pytest.raises(StoreError):
-        await store.complete(KEY, RESPONSE, ttl=3600.0)
+        await store.complete(acquired.record, RESPONSE, ttl=3600.0)
 
 
 async def test_acquire_after_release_returns_created(store: Store) -> None:
@@ -316,8 +386,8 @@ async def test_completed_record_expires_with_completed_ttl(store: Store) -> None
     """``complete``'s ``ttl`` argument actually drives expiry — separate
     knob from ``acquire``'s in-flight ttl. Operators rely on this for
     tuning replay-window length without touching in-flight semantics."""
-    await store.acquire(KEY, FP, ttl=30.0)
-    await store.complete(KEY, RESPONSE, ttl=_TTL_S)
+    acquired = await store.acquire(KEY, FP, ttl=30.0)
+    await store.complete(acquired.record, RESPONSE, ttl=_TTL_S)
     await asyncio.sleep(_TTL_WAIT_S)
 
     assert await store.get(KEY) is None
@@ -327,17 +397,43 @@ async def test_completed_record_expires_with_completed_ttl(store: Store) -> None
 async def test_complete_after_ttl_expires_raises(store: Store) -> None:
     """Production race: in-flight TTL elapses before the handler finishes.
 
-    Both backends must raise — Redis via ``_COMPLETE_LUA``'s ``EXISTS``
-    check after PEXPIRE eviction, InMemory via the ``is_expired``
-    guard. Without this conformance test InMemory used to silently
-    overwrite the expired slot with a fresh COMPLETED record, hiding
-    the ``in_flight_ttl`` tuning bug operators are supposed to see.
+    Both backends must raise — Redis via the Lua's missing-key check
+    after PEXPIRE eviction, InMemory via the ``is_expired`` guard.
+    Without this conformance test InMemory used to silently overwrite
+    the expired slot with a fresh COMPLETED record, hiding the
+    ``in_flight_ttl`` tuning bug operators are supposed to see.
     """
-    await store.acquire(KEY, FP, ttl=_TTL_S)
+    acquired = await store.acquire(KEY, FP, ttl=_TTL_S)
     await asyncio.sleep(_TTL_WAIT_S)
 
     with pytest.raises(StoreError):
-        await store.complete(KEY, RESPONSE, ttl=3600.0)
+        await store.complete(acquired.record, RESPONSE, ttl=3600.0)
+
+
+@pytest.mark.slow
+async def test_complete_rejects_fp_mismatch_after_ttl_reacquire(store: Store) -> None:
+    """Full long-handler race via real TTL eviction.
+
+    Distinct from ``test_complete_rejects_fingerprint_mismatch`` (which
+    uses explicit ``release``) — this one drives the production scenario
+    end-to-end: A's slot evicts by TTL, B re-acquires with a different
+    fingerprint, A's late ``complete`` must raise rather than overwrite
+    B's slot. Catches a backend that handled ``release``-then-reacquire
+    correctly but mishandled TTL-eviction-then-reacquire — Redis's
+    PEXPIRE eviction is a different path from InMemory's lazy ``is_expired``
+    check, and both must converge on the same fp-mismatch verdict.
+    """
+    acquired = await store.acquire(KEY, FP, ttl=_TTL_S)
+    await asyncio.sleep(_TTL_WAIT_S)
+    await store.acquire(KEY, Fingerprint("fp-other"), ttl=30.0)
+
+    with pytest.raises(StoreError):
+        await store.complete(acquired.record, RESPONSE, ttl=3600.0)
+
+    surviving = await store.get(KEY)
+    assert surviving is not None
+    assert surviving.fingerprint == Fingerprint("fp-other")
+    assert surviving.state is IdempotencyState.IN_FLIGHT
 
 
 # ---------------------------------------------------------------------------
@@ -352,8 +448,8 @@ async def test_response_roundtrip_preserves_all_fields(store: Store) -> None:
     override on a future CachedResponse subclass — equality could pass
     while a field silently regresses.
     """
-    await store.acquire(KEY, FP, ttl=30.0)
-    await store.complete(KEY, RESPONSE, ttl=3600.0)
+    acquired = await store.acquire(KEY, FP, ttl=30.0)
+    await store.complete(acquired.record, RESPONSE, ttl=3600.0)
 
     result = await store.acquire(KEY, FP, ttl=30.0)
 

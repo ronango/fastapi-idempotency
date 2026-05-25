@@ -26,7 +26,6 @@ from fastapi_idempotency import (
     StoreError,
 )
 from fastapi_idempotency.stores import redis as redis_module
-from fastapi_idempotency.stores._serde import encode_record
 from fastapi_idempotency.stores.redis import (
     _ACQUIRE_LUA,
     RedisStore,
@@ -122,16 +121,15 @@ def test_wrap_redis_error_returns_store_error_with_op_in_message() -> None:
 def _stub_client(
     *,
     register_script_returns: tuple[Any, Any] | None = None,
-    hget_returns: Any = None,
     hget_raises: BaseException | None = None,
     delete_raises: BaseException | None = None,
 ) -> MagicMock:
     """Build a minimal ``redis.asyncio.Redis``-shaped stub.
 
-    ``register_script_returns`` is a 2-tuple corresponding to the two
-    ``register_script`` calls in ``RedisStore.__init__`` (acquire then
-    complete). ``hget_returns``/``hget_raises`` configure the shared
-    ``hget`` mock; ``delete_raises`` configures ``delete``.
+    ``register_script_returns`` is a 2-tuple matching the two
+    ``register_script`` calls in ``RedisStore.__init__`` (acquire
+    then complete). ``hget_raises`` injects a fault into ``get``;
+    ``delete_raises`` injects one into ``release``.
     """
     client = MagicMock()
     encoder = MagicMock()
@@ -144,7 +142,7 @@ def _stub_client(
     if hget_raises is not None:
         client.hget = AsyncMock(side_effect=hget_raises)
     else:
-        client.hget = AsyncMock(return_value=hget_returns)
+        client.hget = AsyncMock(return_value=None)
     if delete_raises is not None:
         client.delete = AsyncMock(side_effect=delete_raises)
     else:
@@ -157,17 +155,19 @@ FP = Fingerprint("f")
 RESPONSE = CachedResponse(status_code=200, headers=(), body=b"")
 
 
-def _existing_record_bytes() -> bytes:
-    """An IN_FLIGHT record with future ``expires_at`` for complete-path setup."""
-    return encode_record(
-        IdempotencyRecord(
-            key=KEY,
-            fingerprint=FP,
-            state=IdempotencyState.IN_FLIGHT,
-            created_at=time.time(),
-            expires_at=time.time() + 30.0,
-            response=None,
-        ),
+def _in_flight_record() -> IdempotencyRecord:
+    """The in-flight record a caller would pass to ``complete``.
+
+    Same shape as the ``acquire`` result for ``KEY`` / ``FP``.
+    """
+    now = time.time()
+    return IdempotencyRecord(
+        key=KEY,
+        fingerprint=FP,
+        state=IdempotencyState.IN_FLIGHT,
+        created_at=now,
+        expires_at=now + 30.0,
+        response=None,
     )
 
 
@@ -188,26 +188,38 @@ async def test_get_wraps_redis_error_with_op_name() -> None:
         await store.get(KEY)
 
 
-async def test_complete_wraps_hget_redis_error_with_op_name() -> None:
-    client = _stub_client(hget_raises=RedisError("boom"))
-    store = RedisStore(client)
-
-    with pytest.raises(StoreError, match="Redis complete failed"):
-        await store.complete(KEY, RESPONSE, ttl=3600.0)
-
-
-async def test_complete_wraps_script_redis_error_with_op_name() -> None:
-    """The complete path has TWO redis-py call sites (HGET then EVAL).
-    Each must wrap independently — covers the second except path."""
+async def test_complete_wraps_redis_error_with_op_name() -> None:
+    """``complete`` is a single Lua EVAL — its only Redis call site must
+    wrap exceptions as ``StoreError`` with the op name."""
     complete_script = AsyncMock(side_effect=RedisError("boom"))
     client = _stub_client(
         register_script_returns=(AsyncMock(), complete_script),
-        hget_returns=_existing_record_bytes(),
     )
     store = RedisStore(client)
 
     with pytest.raises(StoreError, match="Redis complete failed"):
-        await store.complete(KEY, RESPONSE, ttl=3600.0)
+        await store.complete(_in_flight_record(), RESPONSE, ttl=3600.0)
+
+
+async def test_complete_is_single_round_trip() -> None:
+    """``complete`` must be one redis call — the Lua EVAL with caller's fp.
+
+    The v0.2.0 implementation issued an extra HGET to read the stored
+    fingerprint before the EVAL (2 RTTs, with a TOCTOU window). v0.3.0
+    drops the HGET — the caller's record already carries the fingerprint
+    so the Lua can fp-check directly. Regression-guards a future refactor
+    that re-adds a Python-side probe and silently doubles latency.
+    """
+    complete_script = AsyncMock(return_value=b"ok")
+    client = _stub_client(
+        register_script_returns=(AsyncMock(), complete_script),
+    )
+    store = RedisStore(client)
+
+    await store.complete(_in_flight_record(), RESPONSE, ttl=3600.0)
+
+    assert complete_script.await_count == 1
+    assert client.hget.await_count == 0
 
 
 async def test_release_wraps_redis_error_with_op_name() -> None:
