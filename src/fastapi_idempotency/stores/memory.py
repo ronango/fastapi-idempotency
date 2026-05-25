@@ -82,21 +82,20 @@ class InMemoryStore:
             now = time.time()
             existing = self._records.get(record.key)
             # Expired-but-not-yet-purged records count as gone (matches
-            # Redis PEXPIRE eviction). Must run inside ``self._lock`` —
-            # outside, a TOCTOU race could silent-overwrite a fresh slot.
+            # Redis PEXPIRE eviction).
             if existing is None or existing.is_expired(now):
                 raise StoreError(
                     f"cannot complete unknown idempotency key: {record.key!r}",
                 )
-            # Long-handler race: slot evicted, re-acquired by a different
-            # request, original handler now finishing. Reject instead of
-            # overwriting the new tenant's slot.
             if existing.fingerprint != record.fingerprint:
                 raise StoreError(
                     f"idempotency slot reclaimed by different request: {record.key!r}",
                 )
+            # Write the caller's record, not ``existing`` — keeps both
+            # backends symmetric under same-fp ABA. See DESIGN.md
+            # ("Long-handler race closure").
             self._records[record.key] = replace(
-                existing,
+                record,
                 state=IdempotencyState.COMPLETED,
                 expires_at=now + ttl,
                 response=response,

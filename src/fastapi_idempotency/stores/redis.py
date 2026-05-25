@@ -101,11 +101,9 @@ return {'replay', existing_data}
 """
 
 
-# Single-RTT complete: caller passes the fingerprint it acquired with,
-# Lua fp-checks against stored ``fp`` and rewrites ``state`` + ``data``
-# in one round-trip. Closes the long-handler race (eviction + re-acquire
-# by a different request) — without the fp guard the handler would
-# silently overwrite the new tenant's slot.
+# Single-RTT complete. fp-check + HSET + PEXPIRE in one EVAL —
+# see DESIGN.md ("Long-handler race closure") for why the caller's
+# fp is the guard.
 #
 #   KEYS: [1] full namespaced key
 #   ARGV: [1] expected fingerprint hex, [2] ttl_ms (positive int),

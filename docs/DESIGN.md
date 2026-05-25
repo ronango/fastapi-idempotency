@@ -212,7 +212,42 @@ the in-lock check below is brand new.
   stored `fp` field, fp-checks against the caller's `expected_fp`,
   and rewrites `state`/`data` atomically. The 2-RTT v0.2.0 pattern
   (Python-side `HGET` then Lua `EVAL`) is gone — there is no
-  Python-side window to race against anymore.
+  Python-side window where a different tenant could be swapped in.
+
+Both backends write the caller's `record` (not a re-decoded stored
+record) with `state`/`expires_at`/`response` overridden. The
+fp check makes this safe — a non-matching `record.fingerprint`
+never reaches the write — and it keeps the protocol contract
+short: "complete writes the in-flight record you got from
+`acquire` with three fields overridden."
+
+### Conformance requirements
+
+A third-party `Store.complete` implementation MUST, inside its
+atomic section:
+
+1. Check that the slot is present (backend-defined: server-side
+   eviction, Python-clock `is_expired`, etc.). Raise `StoreError`
+   if not.
+2. Compare the stored fingerprint against `record.fingerprint`.
+   Raise `StoreError` on mismatch.
+3. Persist the caller's `record.created_at`, not the stored
+   record's — under same-fp ABA the two may differ. Both shipped
+   backends rebuild from the caller's `record`; cross-backend
+   behavior then converges.
+
+All three constraints must hold before any state mutation.
+"Atomic section" here means any mechanism that serializes (1) +
+(2) + the subsequent write against concurrent `acquire` /
+`complete` / `release` on the same key — an in-process lock, a
+single Lua `EVAL`, a SERIALIZABLE transaction, a conditional
+update with a fingerprint predicate, etc. The two shipped
+backends use `asyncio.Lock` and single-EVAL Lua respectively.
+
+The conformance suite (`tests/test_stores_conformance.py`)
+enforces all three via `test_complete_rejects_fingerprint_mismatch`,
+`test_complete_raises_on_unknown_key`, and
+`test_complete_preserves_callers_created_at_under_same_fp_aba`.
 
 ### Trade-off: dropping the Python-clock guard on complete
 
@@ -231,14 +266,30 @@ record.
 
 ### What is not closed
 
-Same-fp ABA — eviction + re-acquire with an identical body — is
+**Same-fp ABA.** Eviction + re-acquire with an identical body is
 still possible. Both completions carry the same fp and write valid
-responses; the second wins on `data` (last-write-wins). Accepted as
-benign: both completions are retries of semantically the same
-request, so either response is correct. `created_at` is not a
-reliable audit field under this race — the two backends differ in
-which acquire-time it preserves — but no caller depends on it for
-correctness.
+responses; the second wins on `data` (last-write-wins). Both
+backends now preserve the *caller's* `created_at` (pinned by
+`test_complete_preserves_callers_created_at_under_same_fp_aba`).
+Accepted as benign under HMAC mode: both completions are retries
+of semantically the same request, so either response is correct.
+Under `secret=None` (the insecure mode documented in the
+HMAC-fingerprint section) an attacker who can guess the body can
+forge the same fp and race-acquire post-eviction to capture a
+target's response — yet another reason `secret=None` is for tests
+and one-off migration only.
+
+**The `Store.release` arm of the same race.** The fp guard sits on
+`complete`; `release` still wipes by key alone. The middleware
+calls `store.release(key)` on four paths — handler raises, handler
+returns 5xx, handler emits no `http.response.start`, streamed
+response pass-through — and any of them, when the original handler
+outlives `in_flight_ttl`, can delete a slot re-acquired by a
+different request. No cross-tenant response *leak* — but a
+cross-tenant *availability* failure: the new tenant's `complete`
+then sees an unknown key and delivers `Idempotency-Stored: false`.
+The symmetric closure (`release(record)` with fp check) is tracked
+for a follow-up; not in #44's scope.
 
 ### Protocol break
 

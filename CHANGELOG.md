@@ -19,12 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Long-handler race: a handler outliving `in_flight_ttl` no longer
-  silently overwrites a slot re-acquired by a different request.
-  Both stores now fp-check the caller's record against the stored
-  slot inside their atomic section and raise `StoreError` on
-  mismatch. See `docs/DESIGN.md` ("Long-handler race closure") for
-  the scope of the closure and accepted residuals.
+- Long-handler race on `Store.complete`: a handler outliving
+  `in_flight_ttl` no longer silently overwrites a slot re-acquired
+  by a different request. Both stores fp-check the caller's record
+  against the stored slot inside their atomic section and raise
+  `StoreError` on mismatch. (The `Store.release` arm of the same
+  race is still open; see `docs/DESIGN.md` "Long-handler race
+  closure" for scope and residuals.)
 - `RedisStore.complete` is now a single round-trip (Lua `EVAL`
   only); the v0.2.0 Python-side `HGET` probe is gone.
 

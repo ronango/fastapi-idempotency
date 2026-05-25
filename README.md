@@ -246,17 +246,15 @@ Deeper rationale and per-decision threat analysis in
 
 Defaults that aren't safe in every deployment:
 
-- **`in_flight_ttl` is a tuning signal, not a silent correctness
-  boundary.** If the in-flight slot evicts before the handler
-  finishes and a retry re-acquires the slot with a *different* body,
-  the original handler's `complete()` now raises `StoreError`
-  instead of overwriting the new tenant's record — the response is
-  delivered with `Idempotency-Stored: false`. Closed in v0.3.0 via
-  the `Store.complete(record, ...)` protocol; see `docs/DESIGN.md`
-  ("Long-handler race closure") for the closure mechanism and
-  accepted residuals. Set `in_flight_ttl` above handler p99 to keep
-  the race out of production traffic in the first place — but the
-  cross-tenant silent-overwrite risk is gone.
+- **`in_flight_ttl` is a tuning signal.** If the in-flight slot
+  evicts before the handler finishes and a retry re-acquires the
+  slot with a *different* body, the original handler's `complete()`
+  now raises `StoreError` and the response is delivered with
+  `Idempotency-Stored: false` — no cross-tenant overwrite via
+  `complete`. (A symmetric `Store.release`-arm gap remains; see
+  `docs/DESIGN.md` "Long-handler race closure".) Set
+  `in_flight_ttl` above handler p99 to keep the race out of
+  production traffic.
 - **`max_body_bytes=None` is a DoS surface.** Unbounded body
   buffering lets an attacker hold a worker by sending a slow multi-GB
   body. Set an explicit per-deployment limit for production. The

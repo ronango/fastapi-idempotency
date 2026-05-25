@@ -121,16 +121,15 @@ def test_wrap_redis_error_returns_store_error_with_op_in_message() -> None:
 def _stub_client(
     *,
     register_script_returns: tuple[Any, Any] | None = None,
-    hget_returns: Any = None,
     hget_raises: BaseException | None = None,
     delete_raises: BaseException | None = None,
 ) -> MagicMock:
     """Build a minimal ``redis.asyncio.Redis``-shaped stub.
 
-    ``register_script_returns`` is a 2-tuple corresponding to the two
-    ``register_script`` calls in ``RedisStore.__init__`` (acquire then
-    complete). ``hget_returns``/``hget_raises`` configure the shared
-    ``hget`` mock; ``delete_raises`` configures ``delete``.
+    ``register_script_returns`` is a 2-tuple matching the two
+    ``register_script`` calls in ``RedisStore.__init__`` (acquire
+    then complete). ``hget_raises`` injects a fault into ``get``;
+    ``delete_raises`` injects one into ``release``.
     """
     client = MagicMock()
     encoder = MagicMock()
@@ -143,7 +142,7 @@ def _stub_client(
     if hget_raises is not None:
         client.hget = AsyncMock(side_effect=hget_raises)
     else:
-        client.hget = AsyncMock(return_value=hget_returns)
+        client.hget = AsyncMock(return_value=None)
     if delete_raises is not None:
         client.delete = AsyncMock(side_effect=delete_raises)
     else:

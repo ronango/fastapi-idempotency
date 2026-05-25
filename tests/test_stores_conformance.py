@@ -55,15 +55,19 @@ RESPONSE = CachedResponse(
 
 
 def _record(
+    *,
     key: IdempotencyKey = KEY,
     fingerprint: Fingerprint = FP,
-    *,
     ttl: float = 30.0,
 ) -> IdempotencyRecord:
-    """Synthesize an IN_FLIGHT record matching what ``acquire`` returns.
+    """Synthesize an IN_FLIGHT record for error-path tests only.
 
-    Used by tests that exercise ``complete`` without going through a real
-    ``acquire`` — e.g. error paths where the slot was never created.
+    The ``Store.complete`` contract says ``record`` is an opaque
+    token from ``acquire``. This helper deliberately bypasses that
+    contract to exercise error paths where no slot exists; do not
+    use it in tests that drive happy-path semantics. Keyword-only
+    because ``key`` and ``fingerprint`` are both str-flavoured
+    NewTypes — positional order errors don't type-check.
     """
     now = time.time()
     return IdempotencyRecord(
@@ -226,12 +230,9 @@ async def test_complete_raises_on_unknown_key(store: Store) -> None:
 
 
 async def test_complete_rejects_fingerprint_mismatch(store: Store) -> None:
-    """Long-handler race: the slot the caller acquired was released and
-    re-acquired by a different request before this ``complete`` fires.
-
-    Both backends must reject — otherwise the late ``complete`` would
-    silently overwrite the new tenant's slot with the original handler's
-    response.
+    """Both backends must reject when the stored fp differs from the
+    caller's record. Without this guard a late ``complete`` would
+    overwrite a slot already re-acquired by another request.
     """
     original = (await store.acquire(KEY, FP, ttl=30.0)).record
     await store.release(KEY)
@@ -240,11 +241,35 @@ async def test_complete_rejects_fingerprint_mismatch(store: Store) -> None:
     with pytest.raises(StoreError):
         await store.complete(original, RESPONSE, ttl=3600.0)
 
-    # The new tenant's slot survived intact — no silent overwrite.
     surviving = await store.get(KEY)
     assert surviving is not None
     assert surviving.fingerprint == Fingerprint("fp-other")
     assert surviving.state is IdempotencyState.IN_FLIGHT
+
+
+async def test_complete_preserves_callers_created_at_under_same_fp_aba(
+    store: Store,
+) -> None:
+    """Same-fp ABA: both backends persist the *caller's* ``created_at``.
+
+    Pinned cross-backend so the accepted residual stays observable and
+    consistent — without this, InMemory and Redis could silently diverge
+    on which acquire-time survives.
+    """
+    original = (await store.acquire(KEY, FP, ttl=30.0)).record
+    await store.release(KEY)
+    # Force a measurable gap so the second acquire's ``created_at``
+    # differs from the first — otherwise sub-microsecond ticks could
+    # mask a backend that silently picks the wrong timestamp.
+    await asyncio.sleep(0.01)
+    reacquired = (await store.acquire(KEY, FP, ttl=30.0)).record
+    assert reacquired.created_at > original.created_at
+
+    await store.complete(original, RESPONSE, ttl=3600.0)
+
+    stored = await store.get(KEY)
+    assert stored is not None
+    assert stored.created_at == original.created_at
 
 
 # ---------------------------------------------------------------------------
