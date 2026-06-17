@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, ClassVar
+
+from starlette.requests import Request
 
 from .body_buffer import buffer_request_body
 from .errors import RequestTooLargeError, StoreError
@@ -25,6 +28,14 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+# Returns the bytes prefixed onto the raw Idempotency-Key to isolate the
+# store namespace (per tenant / user / route). Full ``Request`` access so
+# the factory can read auth context (``request.user``) or attributes set
+# by upstream middleware (``request.state``). See ``docs/DESIGN.md``
+# ("Key scoping (scope_factory)").
+ScopeFactory = Callable[[Request], bytes]
 
 
 class _Missing:
@@ -125,6 +136,7 @@ class IdempotencyMiddleware:
         completed_ttl: float = 86_400.0,
         max_body_bytes: int | None = None,
         require_key: bool = False,
+        scope_factory: ScopeFactory | None = None,
     ) -> None:
         if isinstance(secret, _Missing):
             msg = (
@@ -141,6 +153,7 @@ class IdempotencyMiddleware:
         self.completed_ttl = completed_ttl
         self.max_body_bytes = max_body_bytes
         self.require_key = require_key
+        self.scope_factory = scope_factory
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -176,20 +189,68 @@ class IdempotencyMiddleware:
             await self.app(scope, receive, send)
             return
 
-        await self._handle_intercepted(
-            scope,
-            receive,
-            send,
-            IdempotencyKey(key_value),
-        )
+        await self._handle_intercepted(scope, receive, send, key_value)
+
+    async def _resolve_store_key(
+        self,
+        scope: Scope,
+        key_value: str,
+        send: Send,
+    ) -> IdempotencyKey | None:
+        """Apply ``scope_factory`` to the raw key, or send an error and None.
+
+        The factory bytes are hex-encoded and joined to the raw key with
+        ``:`` — hex carries no ``:``, so the split point is unambiguous and
+        distinct ``(scope, key)`` pairs never collide. With no factory the
+        raw key is used unchanged (the v0.2.0 single-tenant behavior).
+        """
+        if self.scope_factory is None:
+            return IdempotencyKey(key_value)
+
+        try:
+            scope_bytes = self.scope_factory(Request(scope))
+        except Exception as exc:
+            # Factory is caller code; a raise is a bug there, not a client
+            # error — surface 500. No exc_info: the message may carry the
+            # raw key or tenant identifiers (see DESIGN.md "Logging").
+            logger.warning(
+                "scope_factory raised; responding 500",
+                extra={
+                    **_log_context(IdempotencyKey(key_value), self._secret),
+                    "exc_type": type(exc).__name__,
+                },
+            )
+            await self._send_plain_response(
+                send,
+                status=500,
+                message="could not resolve idempotency scope",
+            )
+            return None
+
+        if not scope_bytes:
+            # Empty scope would silently collapse every tenant onto the
+            # shared namespace — fail fast as a client-side precondition.
+            await self._send_plain_response(
+                send,
+                status=400,
+                message="idempotency scope is empty",
+            )
+            return None
+
+        return IdempotencyKey(f"{scope_bytes.hex()}:{key_value}")
 
     async def _handle_intercepted(
         self,
         scope: Scope,
         receive: Receive,
         send: Send,
-        key: IdempotencyKey,
+        key_value: str,
     ) -> None:
+        # Resolve scope before buffering: a failing factory should reject
+        # the request without paying for body buffering or a store slot.
+        key = await self._resolve_store_key(scope, key_value, send)
+        if key is None:
+            return
         try:
             body, replay = await buffer_request_body(
                 receive,

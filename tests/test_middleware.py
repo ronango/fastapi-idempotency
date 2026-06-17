@@ -1002,3 +1002,159 @@ async def test_concurrent_request_with_same_key_returns_409() -> None:
 
     assert r1.status_code == 200
     assert r2.status_code == 409
+
+
+def _tenant_scope_middleware(app: Any, store: InMemoryStore) -> IdempotencyMiddleware:
+    """Middleware scoping the key by the ``X-Tenant-Id`` request header."""
+    return IdempotencyMiddleware(
+        app,
+        store,
+        secret=None,
+        scope_factory=lambda req: req.headers["x-tenant-id"].encode(),
+    )
+
+
+async def test_scope_factory_different_scope_does_not_replay() -> None:
+    """Same key + same body but different scope → two independent CREATEDs.
+
+    Without scoping these would collide on one record and the second would
+    REPLAY; the factory must keep the tenants isolated.
+    """
+    invocations = 0
+
+    async def counting_app(scope: Scope, receive: Receive, send: Send) -> None:
+        nonlocal invocations
+        invocations += 1
+        await echo_app(scope, receive, send)
+
+    middleware = _tenant_scope_middleware(counting_app, InMemoryStore())
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        first = await client.post(
+            "/",
+            headers={"Idempotency-Key": "abc", "X-Tenant-Id": "tenant-a"},
+            content=b"hi",
+        )
+        second = await client.post(
+            "/",
+            headers={"Idempotency-Key": "abc", "X-Tenant-Id": "tenant-b"},
+            content=b"hi",
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert "idempotent-replayed" not in second.headers
+    assert invocations == 2
+
+
+async def test_scope_factory_same_scope_replays() -> None:
+    """Same key + same body + same scope preserves CREATED → REPLAY."""
+    middleware = _tenant_scope_middleware(echo_app, InMemoryStore())
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        headers = {"Idempotency-Key": "abc", "X-Tenant-Id": "tenant-a"}
+        first = await client.post("/", headers=headers, content=b"hi")
+        replay = await client.post("/", headers=headers, content=b"hi")
+
+    assert first.status_code == 200
+    assert replay.headers.get("idempotent-replayed") == "true"
+
+
+async def test_scope_factory_orthogonal_to_fingerprint() -> None:
+    """Scope isolates the key; the fingerprint still guards body reuse.
+
+    Same key + same scope + different body must still be a 422 MISMATCH,
+    while a different scope makes the otherwise-mismatching pair two
+    independent CREATEDs — proving scope and fingerprint are separate axes.
+    """
+    middleware = _tenant_scope_middleware(echo_app, InMemoryStore())
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        created = await client.post(
+            "/",
+            headers={"Idempotency-Key": "abc", "X-Tenant-Id": "tenant-a"},
+            content=b"first-body",
+        )
+        mismatch = await client.post(
+            "/",
+            headers={"Idempotency-Key": "abc", "X-Tenant-Id": "tenant-a"},
+            content=b"second-body",
+        )
+        other_tenant = await client.post(
+            "/",
+            headers={"Idempotency-Key": "abc", "X-Tenant-Id": "tenant-b"},
+            content=b"second-body",
+        )
+
+    assert created.status_code == 200
+    assert mismatch.status_code == 422
+    assert other_tenant.status_code == 200
+
+
+async def test_scope_factory_raising_returns_500_without_handler() -> None:
+    """A factory that raises (e.g. missing tenant header) → 500, no handler,
+    no store slot."""
+    invocations = 0
+
+    async def counting_app(scope: Scope, receive: Receive, send: Send) -> None:
+        nonlocal invocations
+        invocations += 1
+        await echo_app(scope, receive, send)
+
+    store = InMemoryStore()
+    middleware = _tenant_scope_middleware(counting_app, store)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            "/",
+            headers={"Idempotency-Key": "abc"},  # no X-Tenant-Id → KeyError
+            content=b"hi",
+        )
+
+    assert response.status_code == 500
+    assert response.text == "could not resolve idempotency scope"
+    assert invocations == 0
+
+
+async def test_scope_factory_empty_bytes_returns_400_without_handler() -> None:
+    """A factory returning empty bytes is a fail-fast 400, never a silent
+    collapse onto the shared namespace."""
+    invocations = 0
+
+    async def counting_app(scope: Scope, receive: Receive, send: Send) -> None:
+        nonlocal invocations
+        invocations += 1
+        await echo_app(scope, receive, send)
+
+    middleware = IdempotencyMiddleware(
+        counting_app,
+        InMemoryStore(),
+        secret=None,
+        scope_factory=lambda _req: b"",
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            "/",
+            headers={"Idempotency-Key": "abc"},
+            content=b"hi",
+        )
+
+    assert response.status_code == 400
+    assert response.text == "idempotency scope is empty"
+    assert invocations == 0

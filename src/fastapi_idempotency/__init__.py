@@ -4,7 +4,9 @@ Public API is the names listed in ``__all__``. Store-implementation
 types (``AcquireOutcome``, ``AcquireResult``, ``IdempotencyRecord``,
 ``IdempotencyState``, ``CachedResponse``, ``IdempotencyKey``,
 ``Fingerprint``) are importable for users writing custom ``Store``
-implementations but kept out of ``__all__`` as advanced surface.
+implementations but kept out of ``__all__`` as advanced surface. The
+``ScopeFactory`` alias is likewise importable for annotating a custom
+``scope_factory`` callable.
 
 ``RedisStore`` is loaded lazily via :pep:`562` ``__getattr__`` so
 ``import fastapi_idempotency`` works without the ``[redis]`` extra.
@@ -19,7 +21,10 @@ from .errors import (
     RequestTooLargeError,
     StoreError,
 )
-from .middleware import IdempotencyMiddleware
+from .middleware import (
+    IdempotencyMiddleware,
+    ScopeFactory as ScopeFactory,
+)
 from .store import Store
 from .stores.memory import InMemoryStore
 from .types import (
