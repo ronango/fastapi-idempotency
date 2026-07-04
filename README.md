@@ -281,6 +281,36 @@ Assumptions:
 Deeper rationale and per-decision threat analysis in
 [`docs/DESIGN.md`](docs/DESIGN.md).
 
+## Configuration
+
+`IdempotencyMiddleware` constructor parameters and their defaults:
+
+| Parameter | Default | Purpose |
+| --- | --- | --- |
+| `secret` | *required* | HMAC-SHA256 key for fingerprints; pass `secret=None` for the explicit insecure opt-out |
+| `in_flight_ttl` | `60.0` | seconds a slot stays `IN_FLIGHT` before the store reclaims it |
+| `completed_ttl` | `86_400.0` | seconds a completed response stays replayable (24h) |
+| `max_body_bytes` | `1_048_576` | max buffered request body (1 MiB); `None` = unbounded |
+| `require_key` | `False` | reject non-safe requests missing the header with `400` |
+| `header_name` | `"Idempotency-Key"` | header carrying the key |
+| `scope_factory` | `None` | per-tenant / per-route key scoping (see "Multi-tenant key scoping") |
+
+### Upgrading from v0.2.0
+
+The `max_body_bytes` default changed from `None` (unbounded) to `1_048_576`
+(1 MiB), so request bodies over 1 MiB are no longer buffered or deduplicated:
+a chunked or understated-`Content-Length` body over the limit now gets `413`,
+while one honestly declaring `Content-Length` over 1 MiB passes through
+un-deduplicated (idempotency skipped). If you rely on unbounded buffering,
+restore it explicitly:
+
+```python
+app.add_middleware(IdempotencyMiddleware, store=store, secret=secret, max_body_bytes=None)
+```
+
+`in_flight_ttl` also rose from `30.0` to `60.0`; lower it explicitly if your
+handlers are fast and you want quicker crash-recovery of stuck slots.
+
 ## Configuration caveats
 
 Defaults that aren't safe in every deployment:
@@ -293,11 +323,12 @@ Defaults that aren't safe in every deployment:
   `complete`. (A symmetric `Store.release`-arm gap remains; see
   `docs/DESIGN.md` "Long-handler race closure".) Set
   `in_flight_ttl` above handler p99 to keep the race out of
-  production traffic.
+  production traffic (the default is `60.0`).
 - **`max_body_bytes=None` is a DoS surface.** Unbounded body
   buffering lets an attacker hold a worker by sending a slow multi-GB
-  body. Set an explicit per-deployment limit for production. The
-  default tightens in v0.3.0.
+  body. The default is `1_048_576` (1 MiB); raise it for deployments
+  with legitimately large uploads, but only set `None` if an upstream
+  layer already bounds body size.
 - **`completed_ttl` is both the dedupe window and the replay window.**
   Default 24h. A leaked `Idempotency-Key` is replayable for as long
   as `completed_ttl`; shorter windows lose dedupe coverage, longer
