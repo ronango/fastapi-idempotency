@@ -71,6 +71,16 @@ def test_missing_secret_kwarg_raises_value_error() -> None:
         IdempotencyMiddleware(echo_app, InMemoryStore())
 
 
+def test_production_safe_defaults() -> None:
+    """v0.3.0 hardening: a bare construction fences the body-DoS surface at
+    1 MiB and gives slow handlers a 60s in-flight slot. Locks the defaults
+    against silent regression — opting out is `max_body_bytes=None`."""
+    middleware = IdempotencyMiddleware(echo_app, InMemoryStore(), secret=None)
+
+    assert middleware.max_body_bytes == 1_048_576
+    assert middleware.in_flight_ttl == 60.0
+
+
 async def test_hmac_secret_caches_response() -> None:
     """End-to-end smoke: a non-None ``secret`` produces working idempotency
     (HMAC fingerprint flows through acquire/complete/replay)."""

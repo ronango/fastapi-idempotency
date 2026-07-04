@@ -132,9 +132,11 @@ class IdempotencyMiddleware:
         *,
         secret: bytes | None | _Missing = _SECRET_NOT_SET,
         header_name: str = "Idempotency-Key",
-        in_flight_ttl: float = 30.0,
+        # Production-safe defaults (v0.3.0): 60s clears handler p99 + retry;
+        # 1 MiB fences the body-DoS surface (max_body_bytes=None opts out).
+        in_flight_ttl: float = 60.0,
         completed_ttl: float = 86_400.0,
-        max_body_bytes: int | None = None,
+        max_body_bytes: int | None = 1_048_576,
         require_key: bool = False,
         scope_factory: ScopeFactory | None = None,
     ) -> None:
