@@ -22,6 +22,7 @@ import time
 from collections import Counter
 from typing import TYPE_CHECKING
 
+import httpx
 import pytest
 
 from fastapi_idempotency import (
@@ -29,6 +30,7 @@ from fastapi_idempotency import (
     CachedResponse,
     Fingerprint,
     IdempotencyKey,
+    IdempotencyMiddleware,
     IdempotencyRecord,
     IdempotencyState,
     InMemoryStore,
@@ -39,6 +41,8 @@ from fastapi_idempotency.stores.redis import RedisStore
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from starlette.types import Receive, Scope, Send
 
 
 KEY = IdempotencyKey("order-conformance")
@@ -459,3 +463,76 @@ async def test_response_roundtrip_preserves_all_fields(store: Store) -> None:
     assert result.record.response.headers == RESPONSE.headers
     assert result.record.response.body == RESPONSE.body
     assert result.record.response.media_type == "application/json"
+
+
+# ---------------------------------------------------------------------------
+# scope_factory — scoping is store-agnostic, so it must behave identically
+# on every backend (scoped keys round-trip through the real Redis key space)
+# ---------------------------------------------------------------------------
+
+
+async def _echo_app(scope: Scope, receive: Receive, send: Send) -> None:
+    """Minimal ASGI app echoing the request body, or 'ok' if empty."""
+    chunks: list[bytes] = []
+    while True:
+        message = await receive()
+        if message["type"] != "http.request":
+            break
+        chunks.append(message.get("body", b""))
+        if not message.get("more_body", False):
+            break
+    body = b"".join(chunks) or b"ok"
+    await send(
+        {"type": "http.response.start", "status": 200, "headers": []},
+    )
+    await send({"type": "http.response.body", "body": body})
+
+
+def _scoped_client(store: Store) -> httpx.AsyncClient:
+    """ASGI client whose middleware scopes the key by ``X-Tenant-Id``."""
+    middleware = IdempotencyMiddleware(
+        _echo_app,
+        store,
+        secret=None,
+        scope_factory=lambda req: req.headers["x-tenant-id"].encode(),
+    )
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=middleware),
+        base_url="http://testserver",
+    )
+
+
+async def test_scope_factory_different_scope_isolates_across_backends(store: Store) -> None:
+    """Same key + same body, different scope → two independent CREATEDs.
+
+    Runs against every backend: the scoped keys must not collide once
+    they round-trip through the real store key space.
+    """
+    async with _scoped_client(store) as client:
+        first = await client.post(
+            "/",
+            headers={"Idempotency-Key": "abc", "X-Tenant-Id": "tenant-a"},
+            content=b"hi",
+        )
+        second = await client.post(
+            "/",
+            headers={"Idempotency-Key": "abc", "X-Tenant-Id": "tenant-b"},
+            content=b"hi",
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert "idempotent-replayed" not in second.headers
+    # Fresh handler output on the second tenant — not a replayed body.
+    assert second.text == "hi"
+
+
+async def test_scope_factory_same_scope_replays_across_backends(store: Store) -> None:
+    """Same key + same body + same scope → CREATED then REPLAY, every backend."""
+    async with _scoped_client(store) as client:
+        headers = {"Idempotency-Key": "abc", "X-Tenant-Id": "tenant-a"}
+        first = await client.post("/", headers=headers, content=b"hi")
+        replay = await client.post("/", headers=headers, content=b"hi")
+
+    assert first.status_code == 200
+    assert replay.headers.get("idempotent-replayed") == "true"
