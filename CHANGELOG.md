@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING** (pre-1.0): production-safe middleware defaults.
+  `max_body_bytes` now defaults to `1_048_576` (1 MiB) instead of `None`
+  (unbounded), so request bodies over 1 MiB are no longer buffered or
+  deduplicated after upgrade — pass `max_body_bytes=None` to restore
+  v0.2.0 behavior.
+  `in_flight_ttl` now defaults to `60.0` instead of `30.0`. See the
+  README "Upgrading from v0.2.0" note.
 - **BREAKING** (pre-1.0): `Store.complete` signature is now
   `complete(record, response, ttl)` where `record` is the in-flight
   `IdempotencyRecord` returned by `acquire`. Third-party `Store`

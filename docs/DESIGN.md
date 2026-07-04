@@ -39,9 +39,11 @@ This document records the reasoning behind non-obvious choices in `fastapi-idemp
 
 A record has two lifetime phases with separate TTLs:
 
-- `in_flight_ttl` (default 30s): time the handler has to finish. A crashed or
+- `in_flight_ttl` (default 60s): time the handler has to finish. A crashed or
   killed process can't run cleanup, so we rely on the short TTL to reclaim the
-  slot — no separate crash-recovery mechanism in the store.
+  slot — no separate crash-recovery mechanism in the store. The v0.3.0 default
+  rose from 30s to 60s to clear handler p99 + retry backoff, so a slow handler
+  doesn't lose its slot and double-execute on retry.
 - `completed_ttl` (default 24h): time the cached response replays for once the
   handler succeeds. This is the window the client has to safely retry.
 
@@ -161,8 +163,9 @@ new record. The implementation revealed the cost: for Lua to set
    `_serde.py` changes for a marginal benefit.
 
 The benefit at issue: clock drift between workers. On NTP-synced hosts
-the drift is milliseconds; v0.2.0's smallest TTL default is 30 s
-(in-flight), 24 h (completed). A ms-scale skew on a 30 s TTL is 0.03 %.
+the drift is milliseconds; the smallest TTL default is 60 s
+(in-flight), 24 h (completed). A ms-scale skew on a 60 s TTL is under
+0.02 %.
 
 **Trade-off accepted**: Python-clock `created_at`/`expires_at` with
 documented NTP-sync requirement, in exchange for keeping `_serde.py` and
