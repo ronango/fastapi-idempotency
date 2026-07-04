@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Raised dependency floors to pull in security fixes: `starlette>=1.3.1`
+  (CVE-2026-48817, CVE-2026-48818, PYSEC-2026-248, PYSEC-2026-249) and
+  `msgpack>=1.2.1` (GHSA-6v7p-g79w-8964). The lockfile now resolves the
+  patched releases; `pip-audit` is clean.
+
 ### Changed
 
 - **BREAKING** (pre-1.0): `Store.complete` signature is now
