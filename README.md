@@ -183,6 +183,43 @@ bytes and `decode_responses=True` would silently corrupt msgpack.
 TTL eviction uses Redis `PEXPIRE`; record fields are advisory metadata
 (query Redis `PTTL` for the eviction authority).
 
+### Multi-tenant key scoping
+
+By default the `Idempotency-Key` is the whole key: two tenants that
+happen to pick the same key value collide on one record. Pass a
+`scope_factory` to isolate them — a `Callable[[Request], bytes]` whose
+returned bytes are prefixed onto the key before the store sees it:
+
+```python
+import os
+
+from fastapi import FastAPI
+
+from fastapi_idempotency import IdempotencyMiddleware, InMemoryStore
+
+app = FastAPI()
+app.add_middleware(
+    IdempotencyMiddleware,
+    store=InMemoryStore(),
+    secret=os.environ["IDEMP_SECRET"].encode(),
+    scope_factory=lambda request: request.headers["X-Tenant-Id"].encode(),
+)
+```
+
+Now the same key from `tenant-a` and `tenant-b` maps to two independent
+records; scope isolation is orthogonal to the body fingerprint, so a
+body change within one tenant still surfaces as a `422` mismatch. The
+factory receives the full Starlette `Request`, so it can also scope by
+authenticated identity (`request.user`) or by an attribute an upstream
+middleware set on `request.state`.
+
+The factory runs before the body is buffered and before any store slot
+is created. If it **raises** (e.g. a required header is missing) the
+request gets `500` without invoking the handler; if it returns **empty
+bytes** it gets `400`. See [`docs/DESIGN.md`](docs/DESIGN.md) ("Key
+scoping") for why an empty scope is rejected, the determinism contract,
+and the collision-safe key-combining scheme.
+
 ## How it works
 
 The middleware watches non-safe HTTP methods (POST/PATCH/PUT/DELETE) for
@@ -218,11 +255,13 @@ The middleware deduplicates concurrent and retried requests on non-safe
 methods. It is **not** a substitute for authentication or authorization.
 Assumptions:
 
-- **No per-tenant key scoping.** Fingerprints cover
-  `(method, path, query, body)` only. Two users sending the same key
-  with the same request see the same cached response — the first
-  tenant's response leaks to the second. Multiplex tenants upstream
-  (per-tenant store, namespaced keys, custom `Store`).
+- **Single-tenant by default; opt into scoping.** Fingerprints cover
+  `(method, path, query, body)` only. Without a `scope_factory` two
+  users sending the same key with the same request see the same cached
+  response — the first tenant's response leaks to the second. Pass a
+  `scope_factory` (see "Multi-tenant key scoping") to isolate tenants
+  inside one store, or multiplex upstream (per-tenant store, namespaced
+  keys, custom `Store`).
 - **HMAC secret required for shared stores.** With `secret=None` the
   fingerprint is plain SHA-256, so an attacker who controls a client
   can probe via wire outcomes (`409` in-flight, `422` mismatch,
