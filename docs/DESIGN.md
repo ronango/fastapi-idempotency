@@ -459,11 +459,61 @@ silently).
 
 ## Key scoping (`scope_factory`)
 
-**Status: planned for v0.3.0.** Not yet implemented.
+**Status: v0.3.0.**
 
-The current key-extraction reads `Idempotency-Key` from the request
-headers. Multi-tenant deployments often want to scope the key by
-something else — tenant ID, authenticated user, route prefix — so
-two tenants sharing the wire-level header don't collide. `scope_factory`
-will be a callable `(scope) -> bytes` injected into the middleware that
-prefixes the raw header value before the store sees it.
+Key extraction reads `Idempotency-Key` from the request headers.
+Multi-tenant deployments often want to scope the key by something else —
+tenant ID, authenticated user, route prefix — so two tenants sharing the
+wire-level header don't collide. `scope_factory` is an optional
+`Callable[[Request], bytes]` injected into the middleware; it receives a
+Starlette `Request` (full access to `request.state`, `request.user`, and
+attributes set by upstream middleware) and returns the bytes that isolate
+the caller's store namespace.
+
+### Combining scope with the key
+
+The returned bytes are hex-encoded and joined to the raw `Idempotency-Key`
+with a `:`:
+
+```python
+store_key = f"{scope_bytes.hex()}:{raw_key}"
+```
+
+Hex output is drawn from `[0-9a-f]` and never contains `:`, so the split
+point is unambiguous and distinct `(scope, key)` pairs can never collide
+onto one store key (the same length-prefixing concern the fingerprint
+solves, met here by a delimiter the prefix alphabet excludes). With
+`scope_factory=None` (the default) the raw key is used unchanged — the
+v0.2.0 single-tenant behavior is preserved byte-for-byte.
+
+Scope is woven into the **key**, not the **fingerprint**: the fingerprint
+already covers `(method, path, query, body)`; scope is an orthogonal axis
+of isolation. Two requests differing only in scope are independent slots,
+while a body change within one scope still surfaces as a `MISMATCH`.
+
+### Resolution timing and failure modes
+
+The factory runs once per intercepted request, before body buffering and
+before `Store.acquire` — a rejected request costs neither a buffered body
+nor a store slot, and the handler is never invoked. Failure handling:
+
+- **Factory raises** → **500**. A raise is a bug in caller code (e.g. a
+  missing header it assumed was present), not a client protocol error. The
+  message is fixed (`could not resolve idempotency scope`) and logged at
+  WARNING without `exc_info` — the exception text may carry the raw key or
+  a tenant identifier (see "Logging — keys hashed").
+- **Factory returns empty `b""`** → **400**. An empty scope would silently
+  collapse every tenant onto the shared namespace, so it is rejected as a
+  fail-fast client precondition rather than honored.
+
+### Determinism contract
+
+Like the fingerprint, `scope_factory` must be **deterministic with respect
+to the request**: the same request must always yield the same scope bytes.
+The scope prefix is not persisted anywhere — it is recomputed on every
+request from the request itself. A factory that depends on per-process or
+per-restart state (a `uuid4()` fixed at startup, `os.getpid()`, a random
+seed) would compute a different prefix after a restart or on another
+worker, so a completed record would no longer be found and replays would
+break. Derive scope only from stable request data (headers, auth identity,
+route), never from process-local state.
